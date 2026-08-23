@@ -1,24 +1,23 @@
 # Harbor
 
-A settlers-of-catan-style board game for 4 friends, played untimed over a group
-chat. **The URL is the save file.** There is no server-side state, no database,
-no accounts. The whole game — board, hands, dev cards, robber, roads — is
-gzipped and base64url'd into the location hash. You take your turn, tap "Send
-the link", and the next player taps it in iMessage.
+A settlers-of-catan-style board game for 4 friends, each on their own phone.
+One invite link (`#g=CODE`) goes into the group chat once; everyone taps it,
+claims a seat with their own name, and plays. The Node server is a **dumb
+versioned store**: it holds the latest client-encoded state blob per game code
+and enforces "strictly newer version wins" — it never reads game state. Clients
+poll every 3 seconds and push moves; on a version conflict they rebase (adopt
+the server state, re-apply the move) and retry.
 
-Typical payload is 350–750 characters. It has never exceeded ~1.5KB in testing.
+The state blob is the same gzipped/base64url `pack()` payload the old
+pass-the-phone version put in the URL hash — typically 350–750 characters.
 
-## Why it works this way
+## History
 
-The first version used Claude artifacts' `window.storage` API with shared keys,
-which synced automatically across everyone's phone. It was better in every way
-except one: opening a published artifact that uses the storage API triggers
-"You need a Claude account to use this artifact." Three friends were not going
-to make accounts. So it was rebuilt with zero persistence.
-
-**Don't reintroduce a storage layer** without checking that constraint still
-matters. If everyone ends up with accounts, the older shared-storage design is
-genuinely nicer and worth resurrecting.
+v1 used Claude artifacts' `window.storage` (needed accounts — rejected). v2
+put the whole game in the URL hash and passed links every turn — worked, but
+the send-the-link-every-turn flow was miserable in practice. v3 (current)
+keeps the same codec but syncs through our own server; old v2 blob links
+still decode and get imported into the server on open.
 
 ## Layout
 
@@ -79,15 +78,16 @@ npm run build      # must run before npm test
 npm test
 ```
 
-`test/smoke.mjs` boots the real shipped bundle in jsdom and plays through the
-UI: full 8-step setup with link hand-offs between simulated devices, then ~30
-turns with sevens, discards and robber moves. It re-boots a fresh jsdom window
-from the on-screen link at each hand-off, so it exercises the codec end to end
-the way a real pass does.
+`test/smoke.mjs` boots the real `server.js`, then drives four jsdom "phones"
+through the real bundle: create a game, claim all seats over the one invite
+link, full 8-step snake-draft setup, then ~35 turns with sevens, discards and
+robber moves — each acted from the owning phone, synced only through the
+server (poll interval shortened via `window.HARBOR_POLL_MS`).
 
-It asserts the snake draft order, that setup produces exactly 6 hand-offs (the
-4th player places twice in a row), that link payloads stay URL-sized, and that
-the board stays coherent. Add a check here for any bug you fix.
+It asserts the snake draft order, that no phone is ever asked to send a link,
+that the stored blob stays small, that seats survive reopening the invite
+link, and that the board stays coherent everywhere. Add a check here for any
+bug you fix.
 
 ## Deploying
 
@@ -110,10 +110,10 @@ Remember to hard-refresh on mobile after a deploy; `Cache-Control` is 5 minutes.
 - **Hidden information isn't actually hidden.** Anyone who decodes the link can
   read every hand. Unavoidable in this design; the UI just doesn't show it.
   This is stated plainly on the home screen.
-- ~~**Opening an old link forks the game.**~~ Fixed: every action bumps a
-  monotonic `seq` counter (packed as `q`), and each device remembers the
-  highest seq it has seen per game code in localStorage. Opening a link older
-  than that shows a warning screen with an explicit "Open the old link anyway"
-  override (which accepts the fork and resets the marker). A device that never
-  saw the newer state can't know a link is stale — the guard is best-effort by
-  design, and fails open where localStorage is unavailable.
+- ~~**Opening an old link forks the game.**~~ Gone by design: the server is
+  authoritative and rejects any push whose `seq` isn't strictly newer, so a
+  stale link just loads and then syncs forward on the next poll.
+- **Games live in server memory only.** A Railway redeploy or restart wipes
+  the store; any phone with the game open reseeds it automatically on its next
+  poll or push. If *every* phone has closed the tab when the server restarts,
+  the game is gone. A disk or KV persistence layer would fix this.

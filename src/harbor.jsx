@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 
 /* ============================================================
    HARBOR — an untimed, play-by-turn settlers game for 4 friends
@@ -316,7 +316,7 @@ function newGame(code, names) {
     code,
     seq: 0,
     createdAt: Date.now(),
-    players: names.map((nm, i) => ({ name: nm, color: i })),
+    players: names.map((nm, i) => ({ name: nm, color: i, claimed: false })),
     board,
     buildings: {},
     roads: {},
@@ -623,6 +623,7 @@ function pack(g) {
     c: g.code,
     q: g.seq || 0,
     n: g.players.map((p) => p.name),
+    cl: g.players.map((p) => (p.claimed ? 1 : 0)),
     t: g.board.hexes.map((h) => T_LIST.indexOf(h.terrain)).join(""),
     m: g.board.hexes.map((h) => h.number || 0).join(","),
     rb: hI[g.board.robber],
@@ -679,7 +680,8 @@ function unpack(o) {
   const g = {
     v: 1, code: o.c,
     seq: o.q || 0,
-    players: o.n.map((nm, i) => ({ name: nm, color: i })),
+    /* legacy blobs have no cl — everyone starts unclaimed and re-picks a seat */
+    players: o.n.map((nm, i) => ({ name: nm, color: i, claimed: !!(o.cl && o.cl[i]) })),
     board: { hexes, ports, robber: GEO.hexes[o.rb].id },
     buildings, roads,
     hands: o.h.map((x) => Object.fromEntries(RES.map((r, i) => [r, x[i]]))),
@@ -730,17 +732,37 @@ async function encodeGame(g) {
   const buf = await new Response(cs.readable).arrayBuffer();
   return "z" + b64url(new Uint8Array(buf));
 }
-/* The newest-seq-seen-per-game marker lets us warn when someone opens a stale
-   link from earlier in the chat. localStorage can throw (private mode,
-   sandboxed frames) — treat storage as best-effort and fail open. */
-const seqKey = (code) => "harbor-seq-" + code;
-function knownSeq(code) {
-  try { return +(window.localStorage.getItem(seqKey(code)) || 0); } catch { return 0; }
-}
-function rememberSeq(code, seq, force) {
+/* ---------- server sync ----------
+   The server is a dumb versioned store: GET returns {v, blob}, PUT accepts
+   only a strictly newer v (else 409 with the current state). v is g.seq. */
+const apiUrl = (code) => new URL("/api/g/" + code, window.location.href).toString();
+async function serverGet(code) {
   try {
-    if (force || seq > knownSeq(code)) window.localStorage.setItem(seqKey(code), String(seq));
-  } catch { /* storage unavailable — the guard just won't fire on this device */ }
+    const r = await fetch(apiUrl(code));
+    if (!r.ok) return null;
+    return await r.json();
+  } catch { return null; }
+}
+async function serverPut(g) {
+  const blob = await encodeGame(g);
+  try {
+    const r = await fetch(apiUrl(g.code), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ v: g.seq || 0, blob }),
+    });
+    if (r.ok) return { ok: true };
+    if (r.status === 409) return { ok: false, conflict: await r.json() };
+    return { ok: false };
+  } catch { return { ok: false, offline: true }; }
+}
+
+const seatKey = (code) => "harbor-seat-" + code;
+function knownSeat(code) {
+  try { const s = window.localStorage.getItem(seatKey(code)); return s == null ? null : +s; } catch { return null; }
+}
+function rememberSeat(code, i) {
+  try { window.localStorage.setItem(seatKey(code), String(i)); } catch { /* best effort */ }
 }
 
 async function decodeGame(str) {
@@ -949,130 +971,148 @@ function Board({ g, sel, onPick }) {
 }
 
 /* ============================================================
-   App — the link is the save file
+   App — one invite link, one seat per phone, server keeps sync
    ============================================================ */
-const actorOf = (g) => {
-  if (g.winner != null) return g.turn;
-  if (g.phase === "discard") return +Object.keys(g.pendingDiscard)[0];
-  return g.turn;
-};
-
 export default function App() {
   const [g, setG] = useState(null);
-  const [link, setLink] = useState("");
-  const [passTo, setPassTo] = useState(null);
-  const [solo, setSolo] = useState(false);
+  const [seat, setSeat] = useState(null);
   const [sel, setSel] = useState(null);
   const [modal, setModal] = useState(null);
   const [tab, setTab] = useState("build");
   const [note, setNote] = useState("");
-  const [names, setNames] = useState(["", "", "", ""]);
+  const [myName, setMyName] = useState("");
+  const [claimName, setClaimName] = useState("");
   const [booting, setBooting] = useState(true);
-  const [stale, setStale] = useState(null);
+  const gRef = useRef(null);
+  gRef.current = g;
 
-  /* load from the URL */
+  const setHashCode = (code) => {
+    try { window.history.replaceState(null, "", "#g=" + code); }
+    catch { try { window.location.hash = "g=" + code; } catch { /* nothing else to try */ } }
+  };
+
+  const adopt = (loaded) => {
+    setG(loaded);
+    const s = knownSeat(loaded.code);
+    if (s != null && loaded.players[s]) setSeat(s);
+  };
+
+  /* load from the URL — either a join code or a legacy pass-the-phone blob */
   useEffect(() => {
     (async () => {
       const h = window.location.hash.replace(/^#/, "");
-      if (h) {
+      const jm = h.match(/^g=([A-Za-z0-9]{4,8})$/);
+      if (jm) {
+        const code = jm[1].toUpperCase();
+        const res = await serverGet(code);
+        if (res) {
+          try { adopt(await decodeGame(res.blob)); }
+          catch { setNote("Game " + code + " couldn't be read from the server."); }
+        } else {
+          setNote("Game " + code + " isn't on the server right now. If it was live recently the server may have restarted — ask anyone who still has the game open on their phone to reopen it, then tap your invite link again.");
+        }
+      } else if (h) {
+        /* old-style link with the whole game in it: sync it into the server
+           and carry on in shared mode. Newest version wins. */
         try {
-          const loaded = await decodeGame(h);
-          const seen = knownSeq(loaded.code);
-          if (seen > (loaded.seq || 0)) {
-            setStale({ g: loaded, seen });
-          } else {
-            rememberSeq(loaded.code, loaded.seq || 0);
-            setG(loaded);
-            setLink(window.location.href);
-          }
+          const local = await decodeGame(h);
+          const res = await serverGet(local.code);
+          let best = local;
+          if (res && res.v > (local.seq || 0)) best = await decodeGame(res.blob);
+          else await serverPut(local);
+          adopt(best);
+          setHashCode(best.code);
         } catch {
-          setNote("That link is damaged — the game state couldn't be read. Ask whoever sent it for the previous link.");
+          setNote("That link is damaged — the game state couldn't be read.");
         }
       }
       setBooting(false);
     })();
   }, []);
 
-  const publish = async (next) => {
-    rememberSeq(next.code, next.seq || 0);
-    const blob = await encodeGame(next);
-    const base = window.location.href.split("#")[0];
-    const url = base + "#" + blob;
-    try {
-      window.history.replaceState(null, "", "#" + blob);
-    } catch {
-      // file:// and sandboxed frames refuse replaceState; a plain fragment set still works
-      try { window.location.hash = blob; } catch { /* nothing else to try */ }
-    }
-    setLink(url);
-    return url;
-  };
+  /* poll the server for other players' moves */
+  useEffect(() => {
+    if (!g) return;
+    const code = g.code;
+    const id = setInterval(async () => {
+      const cur = gRef.current;
+      if (!cur || cur.code !== code) return;
+      const res = await serverGet(code);
+      if (!res) { serverPut(cur); return; } // server restarted — reseed it from here
+      if (res.v > (cur.seq || 0)) {
+        try { setG(await decodeGame(res.blob)); } catch { /* skip a bad poll */ }
+      }
+    }, window.HARBOR_POLL_MS || 3000);
+    return () => clearInterval(id);
+  }, [g && g.code]);
 
+  /* run a mutation, push it, and rebase-retry if someone else moved first */
   const apply = async (fn) => {
-    const before = g ? actorOf(g) : null;
-    const d = clone(g);
-    const out = fn(d);
-    if (out === false) return;
-    d.seq = (d.seq || 0) + 1;
-    if (d.phase !== "over" && scoreFor(d, d.turn, true) >= 10) {
-      d.winner = d.turn; d.phase = "over";
-      say(d, `${pname(d, d.turn)} reached 10 points and wins.`);
+    let latest = gRef.current;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const d = clone(latest);
+      let out;
+      try { out = fn(d); } catch { out = false; }
+      if (out === false) {
+        if (attempt > 0) setNote("Someone else moved first — that move no longer works.");
+        return false;
+      }
+      if (d.phase !== "over" && scoreFor(d, d.turn, true) >= 10) {
+        d.winner = d.turn; d.phase = "over";
+        say(d, `${pname(d, d.turn)} reached 10 points and wins.`);
+      }
+      d.seq = (d.seq || 0) + 1;
+      const r = await serverPut(d);
+      if (r.ok) { setG(d); setSel(null); setNote(""); return true; }
+      if (r.conflict) {
+        try { latest = await decodeGame(r.conflict.blob); } catch { return false; }
+        setG(latest);
+        continue;
+      }
+      setNote(r.offline ? "Can't reach the server — your move wasn't saved. Check your connection and try again." : "The server rejected that move.");
+      return false;
     }
-    setG(d); setSel(null); setNote("");
-    await publish(d);
-    const after = actorOf(d);
-    // a win always interrupts; otherwise only nag when we're actually passing devices
-    if (d.winner != null) setPassTo(after);
-    else if (after !== before && !solo) setPassTo(after);
+    setNote("The game moved while you were tapping — try again.");
+    return false;
   };
 
-  const share = async (url, msg) => {
+  const inviteUrl = g ? window.location.origin + window.location.pathname + "#g=" + g.code : "";
+  const share = async () => {
     try {
-      if (navigator.share) { await navigator.share({ text: msg, url }); return; }
-      await navigator.clipboard.writeText(msg + " " + url);
-      setNote("Copied. Paste it in the group chat.");
-    } catch { setNote("Couldn't copy — long-press the link box and copy it by hand."); }
+      if (navigator.share) { await navigator.share({ text: `Join our Harbor game — code ${g.code}.`, url: inviteUrl }); return; }
+      await navigator.clipboard.writeText(inviteUrl);
+      setNote("Invite link copied — paste it in the group chat.");
+    } catch { setNote("Couldn't copy. The invite link is: " + inviteUrl); }
   };
 
   /* ---- new game ---- */
   const create = async () => {
-    const clean = names.map((n, i) => n.trim() || `Player ${i + 1}`);
-    const game = newGame(makeCode4(), clean);
+    const me = (myName.trim() || "Player 1").slice(0, 14);
+    const game = newGame(makeCode4(), [me, "Player 2", "Player 3", "Player 4"]);
+    game.players[0].claimed = true;
+    game.seq = 1;
+    const r = await serverPut(game);
+    if (!r.ok) { setNote("Couldn't reach the server to create the game — try again in a moment."); return; }
+    rememberSeat(game.code, 0);
+    setSeat(0);
     setG(game);
-    await publish(game);
-    setPassTo(actorOf(game));
+    setHashCode(game.code);
+  };
+
+  /* ---- claim a seat ---- */
+  const claim = async (i) => {
+    const nm = claimName.trim().slice(0, 14);
+    const ok = await apply((d) => {
+      if (d.players[i].claimed) return false;
+      d.players[i].claimed = true;
+      if (nm) d.players[i].name = nm;
+      say(d, `${d.players[i].name} joined the game.`);
+    });
+    if (ok) { rememberSeat(gRef.current.code, i); setSeat(i); }
+    else setNote((n) => n || "That seat was just taken — pick another.");
   };
 
   if (booting) return <div style={{ background: C.ink, minHeight: "100vh" }} />;
-
-  /* ---- STALE LINK ---- */
-  if (stale && !g) {
-    const behind = stale.seen - (stale.g.seq || 0);
-    return (
-      <div style={{ minHeight: "100vh", background: C.ink, color: C.parch, fontFamily: bodyFont, padding: "28px 18px 60px" }}>
-        <style>{FONTS}</style>
-        <div style={{ maxWidth: 520, margin: "0 auto" }}>
-          <div style={{ fontFamily: dispFont, fontWeight: 300, fontSize: 44, letterSpacing: ".26em", lineHeight: 1 }}>HARBOR</div>
-          <div style={{ marginTop: 26, border: `1px solid #a4553d`, borderRadius: 8, padding: 16, background: C.panel }}>
-            <Eyebrow>This link is old</Eyebrow>
-            <div style={{ lineHeight: 1.6, fontSize: 15 }}>
-              This phone has already seen a newer version of this game — the link you tapped
-              is {behind} move{behind === 1 ? "" : "s"} behind. Opening it would fork the game
-              and throw away everything played since.
-              <br /><br />
-              Scroll to the <b>newest</b> link in the group chat and tap that instead.
-            </div>
-            <Btn onClick={() => {
-              rememberSeq(stale.g.code, stale.g.seq || 0, true);
-              setG(stale.g);
-              setLink(window.location.href);
-              setStale(null);
-            }} style={{ width: "100%", marginTop: 14 }}>Open the old link anyway</Btn>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   /* ---- HOME ---- */
   if (!g) {
@@ -1082,27 +1122,22 @@ export default function App() {
         <div style={{ maxWidth: 520, margin: "0 auto" }}>
           <div style={{ fontFamily: dispFont, fontWeight: 300, fontSize: 44, letterSpacing: ".26em", lineHeight: 1 }}>HARBOR</div>
           <div style={{ color: C.parchDim, marginTop: 10, fontSize: 15, fontStyle: "italic" }}>
-            Four settlers, one island, no clock. The link is the game — pass it around the group chat.
+            Four settlers, one island, no clock. Start a game, send one invite link, and everyone plays from their own phone.
           </div>
           <div style={{ marginTop: 26, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
             <Eyebrow>Start a new island</Eyebrow>
-            {names.map((n, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-                <span style={{ width: 12, height: 12, borderRadius: 3, background: PC[i].hex, border: "1px solid rgba(0,0,0,.4)" }} />
-                <input value={n} placeholder={`${PC[i].name} — name`}
-                  onChange={(e) => { const c = names.slice(); c[i] = e.target.value; setNames(c); }}
-                  style={{ flex: 1, background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4,
-                    padding: "9px 10px", color: C.parch, fontFamily: bodyFont, fontSize: 15 }} />
-              </div>
-            ))}
-            <Btn tone="go" onClick={create} style={{ width: "100%", marginTop: 6 }}>Create game</Btn>
+            <input value={myName} placeholder="Your name"
+              onChange={(e) => setMyName(e.target.value)}
+              style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4,
+                padding: "9px 10px", color: C.parch, fontFamily: bodyFont, fontSize: 15, marginBottom: 10 }} />
+            <Btn tone="go" onClick={create} style={{ width: "100%" }}>Create game</Btn>
           </div>
           {note && <div style={{ marginTop: 16, color: "#f0b9a8", lineHeight: 1.5 }}>{note}</div>}
           <div style={{ marginTop: 26, color: C.parchDim, fontSize: 13, lineHeight: 1.65 }}>
-            No accounts, no server, nothing saved anywhere. The whole game lives inside the link, so whoever holds
-            the newest link holds the game. Take your turn, send the new link on, and don't delete the thread.
+            No accounts. You'll get one invite link to drop in the group chat — everyone taps it,
+            picks their seat and name, and the game syncs to all four phones by itself.
             <br /><br />
-            Because the state travels in the link, anyone who really wants to can read everyone's hand out of it.
+            Fair warning: the game state is technically readable by anyone nosy enough to dig.
             Play with people you trust.
           </div>
         </div>
@@ -1110,11 +1145,44 @@ export default function App() {
     );
   }
 
+  /* ---- SEAT PICKER ---- */
+  if (seat == null) {
+    return (
+      <div style={{ minHeight: "100vh", background: C.ink, color: C.parch, fontFamily: bodyFont, padding: "28px 18px 60px" }}>
+        <style>{FONTS}</style>
+        <div style={{ maxWidth: 520, margin: "0 auto" }}>
+          <div style={{ fontFamily: dispFont, fontWeight: 300, fontSize: 44, letterSpacing: ".26em", lineHeight: 1 }}>HARBOR</div>
+          <div style={{ color: C.parchDim, marginTop: 10, fontSize: 15 }}>Game {g.code} — pick your seat.</div>
+          <div style={{ marginTop: 20, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
+            <Eyebrow>Your name</Eyebrow>
+            <input value={claimName} placeholder="Your name"
+              onChange={(e) => setClaimName(e.target.value)}
+              style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4,
+                padding: "9px 10px", color: C.parch, fontFamily: bodyFont, fontSize: 15, marginBottom: 14 }} />
+            <Eyebrow>Open seats</Eyebrow>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {g.players.map((p, i) => (
+                <Btn key={i} disabled={p.claimed} onClick={() => claim(i)}>
+                  <span style={{ display: "inline-block", width: 9, height: 9, borderRadius: 2, background: PC[p.color].hex, marginRight: 8 }} />
+                  {p.claimed ? `${p.name} — taken` : `Take this seat${p.name.startsWith("Player ") ? "" : ` (${p.name})`}`}
+                </Btn>
+              ))}
+            </div>
+          </div>
+          {note && <div style={{ marginTop: 16, color: "#f0b9a8", lineHeight: 1.5 }}>{note}</div>}
+          <div style={{ marginTop: 18, color: C.parchDim, fontSize: 13, lineHeight: 1.6 }}>
+            Your phone remembers your seat for this game — you only do this once.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   /* ---- derived ---- */
-  const actor = actorOf(g);
+  const actor = seat;
   const hand = g.hands[actor];
   const owed = g.pendingDiscard[actor] || 0;
-  const myTurn = g.turn === actor && !g.winner;
+  const myTurn = g.turn === actor && g.winner == null;
   const canBuy = (k) => canAfford(hand, COST[k]);
   const devPlayable = (c) => myTurn && (g.phase === "main" || g.phase === "roll") && !g.devPlayed && c.turn < g.turnNo && !c.used && c.type !== "vp";
   const startBuild = (kind) => {
@@ -1124,7 +1192,7 @@ export default function App() {
   };
   /* setup and robber placement highlight themselves; build modes are chosen by tapping a button */
   const autoSel = (() => {
-    if (g.winner != null) return null;
+    if (!myTurn) return null;
     if (g.phase === "setupTown") return { kind: "town", options: new Set(legalSettlements(g, actor, true)) };
     if (g.phase === "setupRoad") return { kind: "road", options: new Set(legalRoads(g, actor, g.lastSetupVertex)) };
     if (g.phase === "robber") return { kind: "robber", options: new Set(g.board.hexes.filter((h) => h.id !== g.board.robber).map((h) => h.id)) };
@@ -1133,7 +1201,7 @@ export default function App() {
   const effSel = autoSel || (g.phase === "main" ? sel : null);
 
   const onPick = (id) => {
-    if (!effSel) return;
+    if (!effSel || !myTurn) return;
     if (effSel.kind === "robber") return apply((d) => moveRobber(d, id, actor));
     if (g.phase === "setupTown") return apply((d) => placeSetupTown(d, id, actor));
     if (g.phase === "setupRoad") return apply((d) => placeSetupRoad(d, id, actor));
@@ -1144,11 +1212,21 @@ export default function App() {
 
   const status = (() => {
     if (g.winner != null) return `${pname(g, g.winner)} wins with ${scoreFor(g, g.winner, true)} points.`;
+    if (owed > 0) return `You rolled into a seven — discard ${owed} cards.`;
+    if (!myTurn) {
+      const up = g.players[g.turn];
+      if (!up.claimed) return `Waiting for someone to take ${up.name}'s seat — send them the invite link.`;
+      if (g.phase === "discard") {
+        const owing = Object.keys(g.pendingDiscard).map((p) => pname(g, +p)).join(", ");
+        return `Waiting for ${owing} to discard from the seven.`;
+      }
+      return `Waiting for ${up.name} — updates come through on their own.`;
+    }
     switch (g.phase) {
       case "setupTown": return "Tap a highlighted corner to found a town.";
       case "setupRoad": return "Now lay a road beside it.";
       case "roll": return "Roll the dice to start your turn.";
-      case "discard": return `You rolled into a seven — discard ${owed} cards.`;
+      case "discard": return "Waiting for the others to discard from the seven.";
       case "robber": return "Tap a hex to move the robber.";
       case "steal": return "Choose someone to rob.";
       case "main": return "Build, trade, or end the turn.";
@@ -1160,45 +1238,13 @@ export default function App() {
     <div style={{ minHeight: "100vh", background: C.ink, color: C.parch, fontFamily: bodyFont, paddingBottom: 24 }}>
       <style>{FONTS}</style>
 
-      {/* pass-the-link gate */}
-      {passTo != null && (
-        <div style={{ position: "fixed", inset: 0, background: C.ink, zIndex: 80, padding: "34px 18px", overflowY: "auto" }}>
-          <div style={{ maxWidth: 460, margin: "0 auto" }}>
-            <Eyebrow>Game {g.code}</Eyebrow>
-            <div style={{ fontFamily: dispFont, fontSize: 30, letterSpacing: ".08em", lineHeight: 1.15, marginBottom: 6 }}>
-              {g.winner != null ? `${pname(g, g.winner).toUpperCase()} WINS` : `SEND THIS TO ${pname(g, passTo).toUpperCase()}`}
-            </div>
-            <div style={{ color: C.parchDim, fontSize: 15, lineHeight: 1.55, marginBottom: 18 }}>
-              {g.winner != null
-                ? "Send the final link so everyone can see the board."
-                : g.phase === "discard"
-                  ? `They owe ${g.pendingDiscard[passTo]} cards from the seven. Nothing moves until they do it.`
-                  : "This link is the game. If it doesn't get sent, the game stops here."}
-            </div>
-            <Btn tone="go" style={{ width: "100%", padding: "15px", fontSize: 16 }}
-              onClick={() => share(link, `${pname(g, passTo)} — you're up in Harbor (game ${g.code}).`)}>
-              Send the link
-            </Btn>
-            <div style={{ marginTop: 12, background: "rgba(255,255,255,.04)", border: `1px solid ${C.line}`,
-              borderRadius: 5, padding: 10, fontFamily: "monospace", fontSize: 10, wordBreak: "break-all",
-              color: C.parchDim, maxHeight: 90, overflowY: "auto" }}>{link}</div>
-            <Btn style={{ width: "100%", marginTop: 12 }}
-              onClick={() => { if (g.winner == null) setSolo(true); setPassTo(null); }}>
-              {g.winner != null ? "Look at the final board" : "We're on one phone — stop asking"}
-            </Btn>
-            {note && <div style={{ marginTop: 12, color: "#f0b9a8", fontSize: 13 }}>{note}</div>}
-          </div>
-        </div>
-      )}
-
       {/* header */}
       <div style={{ padding: "12px 14px 8px", borderBottom: `1px solid ${C.line}` }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ fontFamily: dispFont, fontSize: 13, letterSpacing: ".28em", color: C.parchDim }}>HARBOR · {g.code}</div>
           <div style={{ display: "flex", gap: 6 }}>
             <Btn onClick={() => setModal({ k: "log" })} style={{ padding: "5px 9px", fontSize: 11 }}>Log</Btn>
-            <Btn tone={solo ? "go" : "plain"} onClick={() => setPassTo(actor)}
-              style={{ padding: "5px 9px", fontSize: 11 }}>Hand off</Btn>
+            <Btn onClick={share} style={{ padding: "5px 9px", fontSize: 11 }}>Invite</Btn>
           </div>
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
@@ -1220,11 +1266,11 @@ export default function App() {
         </div>
       </div>
 
-      {/* who's holding it */}
+      {/* whose turn */}
       {g.winner == null && (
         <div style={{ padding: "8px 14px", background: "rgba(224,164,55,.1)", borderBottom: `1px solid ${C.line}`,
           fontFamily: dispFont, fontSize: 12, letterSpacing: ".12em", textTransform: "uppercase", color: C.gold }}>
-          {solo ? `${pname(g, actor)}'s turn — pass the phone` : `You're playing as ${pname(g, actor)}`}
+          {myTurn ? `Your turn, ${pname(g, actor)}` : `${pname(g, g.turn)}'s turn — you're ${pname(g, actor)}`}
         </div>
       )}
 
@@ -1327,7 +1373,7 @@ export default function App() {
         )}
 
         <div style={{ marginTop: 18, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
-          <Eyebrow>{pname(g, actor)}'s hand — {handTotal(hand)} cards</Eyebrow>
+          <Eyebrow>Your hand — {handTotal(hand)} cards</Eyebrow>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {RES.map((r) => <Chip key={r} res={r} n={hand[r]} />)}
           </div>
@@ -1481,7 +1527,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         <ResStepper value={want} max={partner == null ? cap(0) : theirHand}
           onChange={(r, v) => setWant({ ...want, [r]: Math.min(v, theirHand[r]) })} />
         {partner != null && <div style={{ marginTop: 10, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
-          You can see {pname(g, partner)}'s hand here — that's unavoidable when the whole game rides in the link. Don't be a snake about it.
+          You can see {pname(g, partner)}'s hand here so the trade can be checked. Don't be a snake about it.
         </div>}
       </Sheet>
     );
