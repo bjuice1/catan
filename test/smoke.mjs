@@ -103,9 +103,9 @@ check("claimed names sync to the creator's phone",
 // ---- setup: snake draft happens across phones with no link sends ----
 let sawHandoffScreen = false;
 const noHandoffs = () => { if (phones.some((w) => H(w).includes("SEND THIS TO"))) sawHandoffScreen = true; };
-const activePlacer = async () => {
+const activePlacer = async (list = phones) => {
   for (let i = 0; i < 100; i++) {
-    for (const w of phones) if (spots(w).length) return w;
+    for (const w of list) if (spots(w).length) return w;
     await sleep(60);
   }
   return null;
@@ -175,6 +175,57 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   const re = boot(joinLink, storage);
   const backIn = await wait(re, (x) => H(x).includes("<svg"));
   check("reopening the invite link restores your seat", backIn && H(re).includes("you're Ann") || H(re).includes("Your turn, Ann"));
+}
+
+// ---- renaming yourself mid-game syncs to everyone ----
+{
+  const card = A.document.querySelector('[title="Edit your name"]');
+  if (card) {
+    tap(A, card);
+    await wait(A, (x) => !!x.document.querySelector("input"));
+    setInput(A, A.document.querySelector("input"), "Annie");
+    await sleep(80);
+    click(A, "Save");
+    check("rename syncs to the other phones", await wait(phones[1], (x) => H(x).includes("Annie")));
+  } else {
+    check("own player card offers a rename control", false);
+  }
+}
+
+// ---- a two-player game works end to end through setup ----
+{
+  const E = boot(BASE);
+  await wait(E, (x) => x.document.querySelectorAll("input").length === 1);
+  setInput(E, E.document.querySelector("input"), "Uno");
+  await sleep(80);
+  click(E, "2");
+  await sleep(80);
+  click(E, "Create game");
+  await wait(E, (x) => H(x).includes("<svg"));
+  const code2 = (H(E).match(/HARBOR · ([A-Z0-9]{4})/) || [])[1];
+  check("two-player game is created with two seats", (H(E).match(/·\s*\d+d/g) || []).length === 2);
+
+  const F = boot(BASE + "#g=" + code2);
+  await wait(F, (x) => H(x).includes("pick your seat"));
+  setInput(F, F.document.querySelector("input"), "Duo");
+  await sleep(80);
+  const open = [...F.document.querySelectorAll("button")].find((b) => b.textContent.includes("Take this seat") && !b.disabled);
+  tap(F, open);
+  await wait(F, (x) => H(x).includes("<svg"));
+
+  const pair = [E, F], order2 = [];
+  for (let s = 0; s < 4; s++) {
+    const w = await activePlacer(pair);
+    if (!w) break;
+    order2.push((H(w).match(/Your turn, ([A-Za-z]+)/) || [])[1]);
+    const sp = spots(w); tap(w, sp[Math.floor(Math.random() * sp.length)]);
+    await wait(w, (x) => roadPicks(x).length > 0);
+    const rd = roadPicks(w); tap(w, rd[Math.floor(Math.random() * rd.length)]);
+    await sleep(200);
+  }
+  check("two-player snake draft is A B B A", order2.join("") === "UnoDuoDuoUno");
+  check("two-player setup reaches the roll phase",
+    await wait(E, () => pair.some((w) => btn(w, "Roll the dice")), 6000));
 }
 
 srv.kill();

@@ -981,6 +981,7 @@ export default function App() {
   const [tab, setTab] = useState("build");
   const [note, setNote] = useState("");
   const [myName, setMyName] = useState("");
+  const [myCount, setMyCount] = useState(4);
   const [claimName, setClaimName] = useState("");
   const [booting, setBooting] = useState(true);
   const gRef = useRef(null);
@@ -1088,7 +1089,9 @@ export default function App() {
   /* ---- new game ---- */
   const create = async () => {
     const me = (myName.trim() || "Player 1").slice(0, 14);
-    const game = newGame(makeCode4(), [me, "Player 2", "Player 3", "Player 4"]);
+    const seats = [me];
+    for (let i = 2; i <= myCount; i++) seats.push(`Player ${i}`);
+    const game = newGame(makeCode4(), seats);
     game.players[0].claimed = true;
     game.seq = 1;
     const r = await serverPut(game);
@@ -1129,7 +1132,16 @@ export default function App() {
             <input value={myName} placeholder="Your name"
               onChange={(e) => setMyName(e.target.value)}
               style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4,
-                padding: "9px 10px", color: C.parch, fontFamily: bodyFont, fontSize: 15, marginBottom: 10 }} />
+                padding: "9px 10px", color: C.parch, fontFamily: bodyFont, fontSize: 15, marginBottom: 12 }} />
+            <Eyebrow>How many settlers</Eyebrow>
+            <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+              {[2, 3, 4].map((n) => (
+                <button key={n} onClick={() => setMyCount(n)} style={{ flex: 1,
+                  background: myCount === n ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+                  border: `1px solid ${myCount === n ? C.gold : C.line}`, color: myCount === n ? C.gold : C.parchDim,
+                  borderRadius: 5, padding: "10px", fontFamily: dispFont, fontSize: 15, cursor: "pointer" }}>{n}</button>
+              ))}
+            </div>
             <Btn tone="go" onClick={create} style={{ width: "100%" }}>Create game</Btn>
           </div>
           {note && <div style={{ marginTop: 16, color: "#f0b9a8", lineHeight: 1.5 }}>{note}</div>}
@@ -1249,9 +1261,11 @@ export default function App() {
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
           {g.players.map((p, i) => (
-            <div key={i} style={{ flex: 1, border: `1px solid ${i === actor && !g.winner ? C.gold : C.line}`,
-              background: i === actor && !g.winner ? "rgba(224,164,55,.09)" : "rgba(255,255,255,.02)",
-              borderRadius: 5, padding: "6px 5px", textAlign: "center" }}>
+            <div key={i} title={i === actor ? "Edit your name" : undefined}
+              onClick={i === actor ? () => setModal({ k: "rename" }) : undefined}
+              style={{ flex: 1, border: `1px solid ${i === g.turn && g.winner == null ? C.gold : C.line}`,
+              background: i === g.turn && g.winner == null ? "rgba(224,164,55,.09)" : "rgba(255,255,255,.02)",
+              borderRadius: 5, padding: "6px 5px", textAlign: "center", cursor: i === actor ? "pointer" : "default" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>
                 <span style={{ width: 8, height: 8, borderRadius: 2, background: PC[p.color].hex }} />
                 <span style={{ fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 58 }}>{p.name}</span>
@@ -1424,9 +1438,11 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
   const [partner, setPartner] = useState(null);
   const [bankGive, setBankGive] = useState(null);
   const [bankWant, setBankWant] = useState(null);
+  const [newName, setNewName] = useState(g.players[actor].name);
   useEffect(() => {
     setPick(emptyHand()); setGive(emptyHand()); setWant(emptyHand());
     setPlenty(emptyHand()); setPartner(null); setBankGive(null); setBankWant(null);
+    setNewName(g.players[actor].name);
   }, [modal.k]);
   const close = () => setModal(null);
   const cap = (n) => ({ brick: n, lumber: n, wool: n, grain: n, ore: n });
@@ -1442,6 +1458,27 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         <div style={{ marginTop: 12, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
           Only the last few moves travel in the link — the full history lives in your group chat.
         </div>
+      </Sheet>
+    );
+  }
+
+  if (modal.k === "rename") {
+    const nm = newName.trim().slice(0, 14);
+    return (
+      <Sheet title="Your name" onClose={close}
+        footer={<Btn tone="go" disabled={!nm} style={{ flex: 1 }}
+          onClick={() => {
+            apply((d) => {
+              if (d.players[actor].name === nm) return false;
+              say(d, `${d.players[actor].name} is now ${nm}.`);
+              d.players[actor].name = nm;
+            });
+            close();
+          }}>Save</Btn>}>
+        <input value={newName} onChange={(e) => setNewName(e.target.value)}
+          style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`,
+            borderRadius: 4, padding: "10px", color: C.parch, fontFamily: bodyFont, fontSize: 16 }} />
+        <div style={{ marginTop: 10, color: C.parchDim, fontSize: 13 }}>Everyone sees the change on their next sync.</div>
       </Sheet>
     );
   }
