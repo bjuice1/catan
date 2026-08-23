@@ -316,7 +316,7 @@ function newGame(code, names) {
     code,
     seq: 0,
     createdAt: Date.now(),
-    players: names.map((nm, i) => ({ name: nm, color: i, claimed: false })),
+    players: names.map((nm, i) => ({ name: nm, color: i, claimed: false, lock: "" })),
     board,
     buildings: {},
     roads: {},
@@ -624,6 +624,7 @@ function pack(g) {
     q: g.seq || 0,
     n: g.players.map((p) => p.name),
     cl: g.players.map((p) => (p.claimed ? 1 : 0)),
+    lk: g.players.map((p) => p.lock || ""),
     t: g.board.hexes.map((h) => T_LIST.indexOf(h.terrain)).join(""),
     m: g.board.hexes.map((h) => h.number || 0).join(","),
     rb: hI[g.board.robber],
@@ -681,7 +682,7 @@ function unpack(o) {
     v: 1, code: o.c,
     seq: o.q || 0,
     /* legacy blobs have no cl — everyone starts unclaimed and re-picks a seat */
-    players: o.n.map((nm, i) => ({ name: nm, color: i, claimed: !!(o.cl && o.cl[i]) })),
+    players: o.n.map((nm, i) => ({ name: nm, color: i, claimed: !!(o.cl && o.cl[i]), lock: (o.lk && o.lk[i]) || "" })),
     board: { hexes, ports, robber: GEO.hexes[o.rb].id },
     buildings, roads,
     hands: o.h.map((x) => Object.fromEntries(RES.map((r, i) => [r, x[i]]))),
@@ -756,6 +757,14 @@ async function serverPut(g) {
     return { ok: false };
   } catch { return { ok: false, offline: true }; }
 }
+
+/* Casual protection only: the state is client-readable by design, so this
+   hash keeps honest friends honest — it is not cryptography. */
+const hashWord = (s) => {
+  let h = 5381;
+  for (const ch of s.trim().toLowerCase()) h = ((h * 33) ^ ch.charCodeAt(0)) >>> 0;
+  return h.toString(36);
+};
 
 const seatKey = (code) => "harbor-seat-" + code;
 function knownSeat(code) {
@@ -983,6 +992,8 @@ export default function App() {
   const [myName, setMyName] = useState("");
   const [myCount, setMyCount] = useState(4);
   const [claimName, setClaimName] = useState("");
+  const [rejoinSel, setRejoinSel] = useState(null);
+  const [rejoinWord, setRejoinWord] = useState("");
   const [booting, setBooting] = useState(true);
   const gRef = useRef(null);
   gRef.current = g;
@@ -1115,6 +1126,17 @@ export default function App() {
     else setNote((n) => n || "That seat was just taken — pick another.");
   };
 
+  /* ---- rejoin a claimed seat from a new phone ---- */
+  const rejoin = async (i, word) => {
+    const p = gRef.current.players[i];
+    if (p.lock && hashWord(word || "") !== p.lock) {
+      setNote("That's not " + p.name + "'s secret word.");
+      return;
+    }
+    const ok = await apply((d) => { say(d, `${d.players[i].name} rejoined from another phone.`); });
+    if (ok) { rememberSeat(gRef.current.code, i); setSeat(i); }
+  };
+
   if (booting) return <div style={{ background: C.ink, minHeight: "100vh" }} />;
 
   /* ---- HOME ---- */
@@ -1171,19 +1193,42 @@ export default function App() {
               onChange={(e) => setClaimName(e.target.value)}
               style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4,
                 padding: "9px 10px", color: C.parch, fontFamily: bodyFont, fontSize: 15, marginBottom: 14 }} />
-            <Eyebrow>Open seats</Eyebrow>
+            <Eyebrow>Seats</Eyebrow>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {g.players.map((p, i) => (
-                <Btn key={i} disabled={p.claimed} onClick={() => claim(i)}>
-                  <span style={{ display: "inline-block", width: 9, height: 9, borderRadius: 2, background: PC[p.color].hex, marginRight: 8 }} />
-                  {p.claimed ? `${p.name} — taken` : `Take this seat${p.name.startsWith("Player ") ? "" : ` (${p.name})`}`}
-                </Btn>
+                <React.Fragment key={i}>
+                  <Btn tone={rejoinSel === i ? "go" : "plain"}
+                    onClick={() => (p.claimed ? setRejoinSel(rejoinSel === i ? null : i) : claim(i))}>
+                    <span style={{ display: "inline-block", width: 9, height: 9, borderRadius: 2, background: PC[p.color].hex, marginRight: 8 }} />
+                    {p.claimed ? `${p.name} — taken · rejoin?` : `Take this seat${p.name.startsWith("Player ") ? "" : ` (${p.name})`}`}
+                  </Btn>
+                  {rejoinSel === i && (
+                    <div style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: 12 }}>
+                      <div style={{ color: C.parchDim, fontSize: 13, lineHeight: 1.5, marginBottom: 10 }}>
+                        {p.lock
+                          ? `${p.name}'s seat is protected — enter their secret word.`
+                          : `Only do this if you really are ${p.name} on a new phone. Everyone will see it in the game log.`}
+                      </div>
+                      {p.lock ? (
+                        <input value={rejoinWord} placeholder="Secret word"
+                          onChange={(e) => setRejoinWord(e.target.value)}
+                          style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`,
+                            borderRadius: 4, padding: "9px 10px", color: C.parch, fontFamily: bodyFont, fontSize: 15, marginBottom: 10 }} />
+                      ) : null}
+                      <Btn tone="warn" style={{ width: "100%" }} onClick={() => rejoin(i, rejoinWord)}>
+                        Yes, I'm {p.name} — rejoin
+                      </Btn>
+                    </div>
+                  )}
+                </React.Fragment>
               ))}
             </div>
           </div>
           {note && <div style={{ marginTop: 16, color: "#f0b9a8", lineHeight: 1.5 }}>{note}</div>}
           <div style={{ marginTop: 18, color: C.parchDim, fontSize: 13, lineHeight: 1.6 }}>
-            Your phone remembers your seat for this game — you only do this once.
+            Your phone remembers your seat for this game — you only do this once. If you switch phones,
+            use rejoin. You can set a secret word on your seat (tap your name card in the game) so nobody
+            else can rejoin as you.
           </div>
         </div>
       </div>
@@ -1439,10 +1484,11 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
   const [bankGive, setBankGive] = useState(null);
   const [bankWant, setBankWant] = useState(null);
   const [newName, setNewName] = useState(g.players[actor].name);
+  const [secretWord, setSecretWord] = useState("");
   useEffect(() => {
     setPick(emptyHand()); setGive(emptyHand()); setWant(emptyHand());
     setPlenty(emptyHand()); setPartner(null); setBankGive(null); setBankWant(null);
-    setNewName(g.players[actor].name);
+    setNewName(g.players[actor].name); setSecretWord("");
   }, [modal.k]);
   const close = () => setModal(null);
   const cap = (n) => ({ brick: n, lumber: n, wool: n, grain: n, ore: n });
@@ -1464,21 +1510,35 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
 
   if (modal.k === "rename") {
     const nm = newName.trim().slice(0, 14);
+    const sw = secretWord.trim();
     return (
-      <Sheet title="Your name" onClose={close}
+      <Sheet title="Your seat" onClose={close}
         footer={<Btn tone="go" disabled={!nm} style={{ flex: 1 }}
           onClick={() => {
             apply((d) => {
-              if (d.players[actor].name === nm) return false;
-              say(d, `${d.players[actor].name} is now ${nm}.`);
-              d.players[actor].name = nm;
+              const renamed = d.players[actor].name !== nm;
+              if (!renamed && !sw) return false;
+              if (renamed) {
+                say(d, `${d.players[actor].name} is now ${nm}.`);
+                d.players[actor].name = nm;
+              }
+              if (sw) d.players[actor].lock = hashWord(sw);
             });
             close();
           }}>Save</Btn>}>
+        <Eyebrow>Name</Eyebrow>
         <input value={newName} onChange={(e) => setNewName(e.target.value)}
           style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`,
+            borderRadius: 4, padding: "10px", color: C.parch, fontFamily: bodyFont, fontSize: 16, marginBottom: 14 }} />
+        <Eyebrow>Secret word{g.players[actor].lock ? " — set" : ""}</Eyebrow>
+        <input value={secretWord} onChange={(e) => setSecretWord(e.target.value)}
+          placeholder={g.players[actor].lock ? "Enter a new one to change it" : "Optional"}
+          style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`,
             borderRadius: 4, padding: "10px", color: C.parch, fontFamily: bodyFont, fontSize: 16 }} />
-        <div style={{ marginTop: 10, color: C.parchDim, fontSize: 13 }}>Everyone sees the change on their next sync.</div>
+        <div style={{ marginTop: 10, color: C.parchDim, fontSize: 13, lineHeight: 1.5 }}>
+          If you ever open the game on a different phone, the secret word proves the seat is yours.
+          Without one, anyone can rejoin as you (it does get announced in the log).
+        </div>
       </Sheet>
     );
   }

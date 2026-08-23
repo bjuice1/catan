@@ -192,6 +192,41 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   }
 }
 
+// ---- rejoining a claimed seat from a brand-new phone ----
+{
+  const G = boot(joinLink); // no seeded storage: a phone this game has never seen
+  await wait(G, (x) => H(x).includes("pick your seat"));
+  click(G, "Ben — taken · rejoin?");
+  await sleep(80);
+  click(G, "Yes, I'm Ben — rejoin");
+  check("an unprotected seat can be rejoined from a new phone", await wait(G, (x) => H(x).includes("<svg")));
+}
+
+// ---- a secret word protects a seat from strangers ----
+{
+  // Annie sets a secret word on her seat
+  tap(A, A.document.querySelector('[title="Edit your name"]'));
+  await wait(A, (x) => x.document.querySelectorAll("input").length === 2);
+  setInput(A, A.document.querySelectorAll("input")[1], "harborqueen");
+  await sleep(80);
+  click(A, "Save");
+  await sleep(400);
+
+  const G = boot(joinLink);
+  await wait(G, (x) => H(x).includes("pick your seat"));
+  click(G, "Annie — taken · rejoin?");
+  await wait(G, (x) => !!x.document.querySelector('input[placeholder="Secret word"]'));
+  setInput(G, G.document.querySelector('input[placeholder="Secret word"]'), "wrongword");
+  await sleep(80);
+  click(G, "Yes, I'm Annie — rejoin");
+  await sleep(300);
+  check("the wrong secret word is rejected", !H(G).includes("<svg") && H(G).includes("secret word"));
+  setInput(G, G.document.querySelector('input[placeholder="Secret word"]'), "HarborQueen  ");
+  await sleep(80);
+  click(G, "Yes, I'm Annie — rejoin");
+  check("the right secret word rejoins the seat", await wait(G, (x) => H(x).includes("<svg")));
+}
+
 // ---- a two-player game works end to end through setup ----
 {
   const E = boot(BASE);
