@@ -22,12 +22,14 @@ still decode and get imported into the server on open.
 ## Layout
 
 ```
-src/harbor.jsx    Everything: geometry, rules, codec, UI. ~1400 lines.
+src/harbor.jsx    Everything: geometry, rules, codec, sync, UI. ~1800 lines.
 src/main.jsx      Mounts App into #root.
 build.mjs         esbuild → inlines React + app into a single index.html.
 index.html        Build output. COMMITTED — Railway serves it directly.
-server.js         12 lines of Node. Serves index.html on every path.
-test/smoke.mjs    Plays a real game through jsdom. See below.
+server.js         Versioned game store + web push + static PWA files.
+manifest.webmanifest, sw.js, icons/   The PWA shell (icons are generated
+                  by scripts/make-icons.mjs and committed).
+test/smoke.mjs    Real server + four jsdom phones. See below.
 ```
 
 `src/harbor.jsx` is organised in four bands, in order:
@@ -105,8 +107,13 @@ Remember to hard-refresh on mobile after a deploy; `Cache-Control` is 5 minutes.
 - **Zoom on real hardware is unverified.** The board is capped at `52vh` and
   pinch is unblocked, but the original report ("way too zoom, then the zoom is
   broken") was never confirmed fixed on an actual iPhone. Get a screenshot.
-- **No notifications.** The group chat is the notification system. A player who
-  doesn't get poked will stall the game indefinitely.
+- ~~**No notifications.**~~ Web push ships: the server pings the next player
+  on turn changes and seven-discards (driven by client-sent `meta`, so the
+  server stays blob-blind; deduped per turn number). On iPhone this only works
+  after Add to Home Screen + tapping 🔔. VAPID keys are generated per server
+  run unless pinned with `VAPID_PUBLIC`/`VAPID_PRIVATE` env vars on Railway —
+  pin them, else subscriptions silently re-key after each deploy (clients do
+  self-heal by re-subscribing on next open).
 - **Hidden information isn't actually hidden.** Anyone who decodes the link can
   read every hand. Unavoidable in this design; the UI just doesn't show it.
   This is stated plainly on the home screen.

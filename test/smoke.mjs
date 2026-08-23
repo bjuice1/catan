@@ -237,6 +237,54 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   check("the right secret word rejoins the seat", await wait(G, (x) => H(x).includes("<svg")));
 }
 
+// ---- PWA surface: manifest, service worker, icons ----
+{
+  const man = await fetch(BASE + "manifest.webmanifest");
+  const manOk = man.ok && (await man.json()).name === "Harbor";
+  const sw = await fetch(BASE + "sw.js");
+  const swOk = sw.ok && (await sw.text()).includes("notificationclick");
+  const icon = await fetch(BASE + "icon-192.png");
+  const iconBytes = new Uint8Array(await icon.arrayBuffer());
+  const iconOk = icon.ok && iconBytes[0] === 0x89 && iconBytes[1] === 0x50; // PNG magic
+  const touch = await fetch(BASE + "apple-touch-icon.png");
+  check("manifest, sw.js and icons are served", manOk && swOk && iconOk && touch.ok);
+}
+
+// ---- push plumbing: key, subscribe, and a PUT that triggers a ping ----
+{
+  const key = await (await fetch(BASE + "api/push/key")).json();
+  check("push key endpoint serves a VAPID key", typeof key.key === "string" && key.key.length > 20);
+  const subRes = await fetch(BASE + "api/push/sub/" + code, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ seat: 1, sub: { endpoint: "https://127.0.0.1:9/dead", keys: { p256dh: "x", auth: "y" } } }),
+  });
+  check("push subscriptions are accepted", subRes.ok);
+  // a turn-change PUT must succeed even though delivering to the dead endpoint fails
+  const cur = await (await fetch(BASE + "api/g/" + code)).json();
+  const put = await fetch(BASE + "api/g/" + code, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ v: cur.v + 1, blob: cur.blob, meta: { by: 0, turn: 1, tn: 999, discard: [], winner: null } }),
+  });
+  await sleep(300);
+  const alive = (await (await fetch(BASE + "health")).text()) === "ok";
+  check("a failing push delivery never breaks the store", put.ok && alive);
+}
+
+// ---- the lobby: the app icon opens a list of your games ----
+{
+  const storage = {};
+  for (let i = 0; i < A.localStorage.length; i++) { const k = A.localStorage.key(i); storage[k] = A.localStorage.getItem(k); }
+  const L = boot(BASE, storage); // no hash: straight to the home screen
+  const listed = await wait(L, (x) => H(x).includes("Your games") && H(x).includes(code));
+  check("home screen lists the games this phone is in", listed);
+  const row = [...L.document.querySelectorAll("button")].find((b) => b.textContent.includes(code));
+  tap(L, row);
+  check("tapping a lobby game opens its board", await wait(L, (x) => H(x).includes("<svg")));
+  const back = L.document.querySelector('[title="All your games"]');
+  if (back) { tap(L, back); }
+  check("the header takes you back to the lobby", !!back && await wait(L, (x) => H(x).includes("Your games")));
+}
+
 // ---- a two-player game works end to end through setup ----
 {
   const E = boot(BASE);

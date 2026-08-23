@@ -757,13 +757,20 @@ async function serverGet(code) {
     return await r.json();
   } catch { return null; }
 }
-async function serverPut(g) {
+async function serverPut(g, by) {
   const blob = await encodeGame(g);
+  /* meta lets the server ping whoever is up next without reading the blob */
+  const meta = {
+    by: by == null ? -1 : by,
+    turn: g.turn, tn: g.turnNo,
+    discard: Object.keys(g.pendingDiscard || {}).map(Number),
+    winner: g.winner == null ? null : g.winner,
+  };
   try {
     const r = await fetch(apiUrl(g.code), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ v: g.seq || 0, blob }),
+      body: JSON.stringify({ v: g.seq || 0, blob, meta }),
     });
     if (r.ok) return { ok: true };
     if (r.status === 409) return { ok: false, conflict: await r.json() };
@@ -785,6 +792,57 @@ function knownSeat(code) {
 }
 function rememberSeat(code, i) {
   try { window.localStorage.setItem(seatKey(code), String(i)); } catch { /* best effort */ }
+}
+
+/* the lobby: every game this phone has sat down in */
+function knownGames() {
+  try { return JSON.parse(window.localStorage.getItem("harbor-games") || "[]"); } catch { return []; }
+}
+function rememberGame(code) {
+  try {
+    const list = knownGames().filter((g) => g.code !== code);
+    list.unshift({ code, t: Date.now() });
+    window.localStorage.setItem("harbor-games", JSON.stringify(list.slice(0, 12)));
+  } catch { /* best effort */ }
+}
+function forgetGame(code) {
+  try {
+    window.localStorage.setItem("harbor-games", JSON.stringify(knownGames().filter((g) => g.code !== code)));
+  } catch { /* best effort */ }
+}
+
+/* ---------- push notifications ---------- */
+const pushSupported = () =>
+  typeof window !== "undefined" && "serviceWorker" in window.navigator &&
+  "PushManager" in window && "Notification" in window;
+
+function vapidToBytes(b64url) {
+  const s = b64url.replace(/-/g, "+").replace(/_/g, "/");
+  const bin = window.atob(s + "=".repeat((4 - (s.length % 4)) % 4));
+  return Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
+}
+
+/* Subscribe (or quietly re-subscribe if the server's key rotated) and tell
+   the server which seat this phone is. Safe to call repeatedly. */
+async function syncPush(code, seat) {
+  if (!pushSupported() || window.Notification.permission !== "granted") return false;
+  try {
+    const reg = await window.navigator.serviceWorker.ready;
+    const { key } = await (await fetch(new URL("/api/push/key", window.location.href))).json();
+    let sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      const cur = sub.options.applicationServerKey && btoa(String.fromCharCode(...new Uint8Array(sub.options.applicationServerKey)))
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      if (cur && cur !== key) { await sub.unsubscribe(); sub = null; }
+    }
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidToBytes(key) });
+    await fetch(new URL("/api/push/sub/" + code, window.location.href), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat, sub: sub.toJSON() }),
+    });
+    return true;
+  } catch { return false; }
 }
 
 async function decodeGame(str) {
@@ -1025,6 +1083,8 @@ export default function App() {
   const [rejoinSel, setRejoinSel] = useState(null);
   const [rejoinWord, setRejoinWord] = useState("");
   const [booting, setBooting] = useState(true);
+  const [lobby, setLobby] = useState(null);
+  const [pushReady, setPushReady] = useState(false);
   const gRef = useRef(null);
   gRef.current = g;
 
@@ -1036,7 +1096,17 @@ export default function App() {
   const adopt = (loaded) => {
     setG(loaded);
     const s = knownSeat(loaded.code);
-    if (s != null && loaded.players[s]) setSeat(s);
+    if (s != null && loaded.players[s]) { setSeat(s); rememberGame(loaded.code); }
+  };
+
+  const loadByCode = async (code) => {
+    const res = await serverGet(code);
+    if (!res) {
+      setNote("Game " + code + " isn't on the server right now. If it was live recently the server may have restarted — ask anyone who still has the game open on their phone to reopen it, then tap your invite link again.");
+      return false;
+    }
+    try { adopt(await decodeGame(res.blob)); setHashCode(code); return true; }
+    catch { setNote("Game " + code + " couldn't be read from the server."); return false; }
   };
 
   /* load from the URL — either a join code or a legacy pass-the-phone blob */
@@ -1045,14 +1115,7 @@ export default function App() {
       const h = window.location.hash.replace(/^#/, "");
       const jm = h.match(/^g=([A-Za-z0-9]{4,8})$/);
       if (jm) {
-        const code = jm[1].toUpperCase();
-        const res = await serverGet(code);
-        if (res) {
-          try { adopt(await decodeGame(res.blob)); }
-          catch { setNote("Game " + code + " couldn't be read from the server."); }
-        } else {
-          setNote("Game " + code + " isn't on the server right now. If it was live recently the server may have restarted — ask anyone who still has the game open on their phone to reopen it, then tap your invite link again.");
-        }
+        await loadByCode(jm[1].toUpperCase());
       } else if (h) {
         /* old-style link with the whole game in it: sync it into the server
            and carry on in shared mode. Newest version wins. */
@@ -1071,6 +1134,58 @@ export default function App() {
       setBooting(false);
     })();
   }, []);
+
+  /* on the home screen, look up how each remembered game is doing */
+  useEffect(() => {
+    if (g || booting) return;
+    let dead = false;
+    (async () => {
+      const list = knownGames().slice(0, 8);
+      if (!list.length) { setLobby([]); return; }
+      const out = [];
+      for (const it of list) {
+        const res = await serverGet(it.code);
+        if (!res) { out.push({ code: it.code, gone: true }); continue; }
+        try {
+          const gm = await decodeGame(res.blob);
+          const s = knownSeat(it.code);
+          out.push({
+            code: it.code,
+            names: gm.players.filter((p) => p.claimed).map((p) => p.name).join(", "),
+            turnName: pname(gm, gm.turn),
+            myTurn: s != null && gm.winner == null && (gm.turn === s || (gm.pendingDiscard[s] || 0) > 0),
+            over: gm.winner != null,
+          });
+        } catch { out.push({ code: it.code, gone: true }); }
+      }
+      if (!dead) setLobby(out);
+    })();
+    return () => { dead = true; };
+  }, [g, booting]);
+
+  /* keep this phone's push subscription registered for the current game */
+  useEffect(() => {
+    if (!g || seat == null) return;
+    syncPush(g.code, seat).then((ok) => { if (ok) setPushReady(true); });
+  }, [g && g.code, seat]);
+
+  const enablePush = async () => {
+    if (!pushSupported()) {
+      setNote("Turn alerts need Harbor on your Home Screen first: tap Share, then \"Add to Home Screen\", open it from there and tap 🔔 again.");
+      return;
+    }
+    const perm = await window.Notification.requestPermission();
+    if (perm !== "granted") { setNote("Notifications stayed off."); return; }
+    const ok = await syncPush(gRef.current.code, seat);
+    setPushReady(ok);
+    setNote(ok ? "Turn alerts are on — this phone gets a ping when you're up." : "Couldn't set up notifications — try again in a moment.");
+  };
+
+  const goHome = () => {
+    setG(null); setSeat(null); setNote(""); setLobby(null); setPushReady(false);
+    try { window.history.replaceState(null, "", window.location.pathname); }
+    catch { try { window.location.hash = ""; } catch { /* fine */ } }
+  };
 
   /* poll the server for other players' moves */
   useEffect(() => {
@@ -1104,7 +1219,7 @@ export default function App() {
         say(d, `${pname(d, d.turn)} reached 10 points and wins.`);
       }
       d.seq = (d.seq || 0) + 1;
-      const r = await serverPut(d);
+      const r = await serverPut(d, seat);
       if (r.ok) {
         if (d._stole) {
           setNote(`You stole 1 ${RES_LABEL[d._stole.res].toLowerCase()} ${RES_ICON[d._stole.res]} from ${d._stole.from}.`);
@@ -1142,9 +1257,10 @@ export default function App() {
     const game = newGame(makeCode4(), seats);
     game.players[0].claimed = true;
     game.seq = 1;
-    const r = await serverPut(game);
+    const r = await serverPut(game, 0);
     if (!r.ok) { setNote("Couldn't reach the server to create the game — try again in a moment."); return; }
     rememberSeat(game.code, 0);
+    rememberGame(game.code);
     setSeat(0);
     setG(game);
     setHashCode(game.code);
@@ -1159,7 +1275,7 @@ export default function App() {
       if (nm) d.players[i].name = nm;
       say(d, `${d.players[i].name} joined the game.`);
     });
-    if (ok) { rememberSeat(gRef.current.code, i); setSeat(i); }
+    if (ok) { rememberSeat(gRef.current.code, i); rememberGame(gRef.current.code); setSeat(i); }
     else setNote((n) => n || "That seat was just taken — pick another.");
   };
 
@@ -1171,7 +1287,7 @@ export default function App() {
       return;
     }
     const ok = await apply((d) => { say(d, `${d.players[i].name} rejoined from another phone.`); });
-    if (ok) { rememberSeat(gRef.current.code, i); setSeat(i); }
+    if (ok) { rememberSeat(gRef.current.code, i); rememberGame(gRef.current.code); setSeat(i); }
   };
 
   if (booting) return <div style={{ background: C.ink, minHeight: "100vh" }} />;
@@ -1184,8 +1300,31 @@ export default function App() {
         <div style={{ maxWidth: 520, margin: "0 auto" }}>
           <div style={{ fontFamily: dispFont, fontWeight: 300, fontSize: 44, letterSpacing: ".26em", lineHeight: 1 }}>HARBOR</div>
           <div style={{ color: C.parchDim, marginTop: 10, fontSize: 15, fontStyle: "italic" }}>
-            Four settlers, one island, no clock. Start a game, send one invite link, and everyone plays from their own phone.
+            Settlers with friends, no clock. Start a game, send one invite link, and everyone plays from their own phone.
           </div>
+          {lobby && lobby.length > 0 && (
+            <div style={{ marginTop: 26, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
+              <Eyebrow>Your games</Eyebrow>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {lobby.map((it) => (
+                  <div key={it.code} style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+                    <Btn tone={it.myTurn ? "go" : "plain"} style={{ flex: 1, textAlign: "left" }}
+                      onClick={() => loadByCode(it.code)}>
+                      <b style={{ letterSpacing: ".08em" }}>{it.code}</b>
+                      {" · "}
+                      {it.gone ? "unreachable right now"
+                        : it.over ? "finished"
+                        : it.myTurn ? "YOUR TURN"
+                        : `waiting on ${it.turnName}`}
+                      {it.names ? <span style={{ color: C.parchDim }}> — {it.names}</span> : null}
+                    </Btn>
+                    <Btn onClick={() => { forgetGame(it.code); setLobby(lobby.filter((x) => x.code !== it.code)); }}
+                      style={{ padding: "6px 10px" }}>×</Btn>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div style={{ marginTop: 26, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
             <Eyebrow>Start a new island</Eyebrow>
             <input value={myName} placeholder="Your name"
@@ -1335,8 +1474,12 @@ export default function App() {
       {/* header */}
       <div style={{ padding: "12px 14px 8px", borderBottom: `1px solid ${C.line}` }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ fontFamily: dispFont, fontSize: 13, letterSpacing: ".28em", color: C.parchDim }}>HARBOR · {g.code}</div>
+          <div onClick={goHome} title="All your games" style={{ fontFamily: dispFont, fontSize: 13, letterSpacing: ".28em", color: C.parchDim, cursor: "pointer" }}>
+            ‹ HARBOR · {g.code}</div>
           <div style={{ display: "flex", gap: 6 }}>
+            {!pushReady && (!pushSupported() || window.Notification.permission === "default") && (
+              <Btn onClick={enablePush} style={{ padding: "5px 9px", fontSize: 11 }}>🔔</Btn>
+            )}
             <Btn onClick={() => setModal({ k: "rolls" })} style={{ padding: "5px 9px", fontSize: 11 }}>Rolls</Btn>
             <Btn onClick={() => setModal({ k: "log" })} style={{ padding: "5px 9px", fontSize: 11 }}>Log</Btn>
             <Btn onClick={share} style={{ padding: "5px 9px", fontSize: 11 }}>Invite</Btn>

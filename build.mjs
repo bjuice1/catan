@@ -28,6 +28,11 @@ const html = `<!DOCTYPE html>
 <meta name="apple-mobile-web-app-title" content="Harbor">
 <meta name="theme-color" content="#061419">
 <meta name="robots" content="noindex, nofollow">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta property="og:title" content="Harbor">
+<meta property="og:description" content="A settlers game for friends — tap to take your seat.">
+<meta property="og:image" content="/icon-512.png">
 <title>Harbor</title>
 <style>
   html,body{margin:0;padding:0;background:#061419;-webkit-text-size-adjust:100%;}
@@ -40,6 +45,9 @@ const html = `<!DOCTYPE html>
 <div id="root"></div>
 <script>
 ${js}
+</script>
+<script>
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function () {});
 </script>
 </body>
 </html>
