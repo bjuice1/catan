@@ -7,6 +7,8 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 
 const RES = ["brick", "lumber", "wool", "grain", "ore"];
 const RES_LABEL = { brick: "Brick", lumber: "Lumber", wool: "Wool", grain: "Grain", ore: "Ore" };
+const RES_ICON = { brick: "🧱", lumber: "🪵", wool: "🐑", grain: "🌾", ore: "🪨" };
+const TERRAIN_ICON = { hills: "🧱", forest: "🌲", pasture: "🐑", fields: "🌾", mountains: "🪨", desert: "🏜️" };
 const TERRAIN_RES = {
   hills: "brick", forest: "lumber", pasture: "wool",
   fields: "grain", mountains: "ore", desert: null,
@@ -331,6 +333,7 @@ function newGame(code, names) {
     largestArmy: null,
     turn: order[0],
     turnNo: 0,
+    rolls: [],
     phase: "setupTown",
     setupOrder: order,
     setupIdx: 0,
@@ -424,6 +427,8 @@ function rollDice(g) {
   const d1 = 1 + Math.floor(Math.random() * 6);
   const d2 = 1 + Math.floor(Math.random() * 6);
   g.dice = [d1, d2];
+  g.rolls.push(d1 + d2);
+  if (g.rolls.length > 200) g.rolls = g.rolls.slice(-200);
   const sum = d1 + d2;
   say(g, `${pname(g, g.turn)} rolled ${sum} (${d1}+${d2}).`);
   if (sum === 7) {
@@ -467,7 +472,11 @@ function moveRobber(g, hid, p) {
   g.stealFrom = [...victims];
   say(g, `${pname(g, p)} moved the robber.`);
   if (g.stealFrom.length === 1) return stealFrom(g, g.stealFrom[0], p);
-  if (g.stealFrom.length === 0) { g.phase = g.robberReturn; return g; }
+  if (g.stealFrom.length === 0) {
+    say(g, `No one to rob there — nobody with cards borders that hex.`);
+    g.phase = g.robberReturn;
+    return g;
+  }
   g.phase = "steal";
   return g;
 }
@@ -480,6 +489,8 @@ function stealFrom(g, victim, p) {
     g.hands[victim][r] -= 1;
     g.hands[p][r] += 1;
     say(g, `${pname(g, p)} stole a card from ${pname(g, victim)}.`);
+    /* underscore fields are never pack()ed — this stays on the thief's phone */
+    g._stole = { from: pname(g, victim), res: r };
   }
   g.stealFrom = [];
   g.phase = g.robberReturn;
@@ -640,6 +651,7 @@ function pack(g) {
     ll: g.longestRoadLen,
     la: g.largestArmy == null ? -1 : g.largestArmy,
     tu: g.turn, tn: g.turnNo,
+    rl: g.rolls.join(","),
     ph: PH_LIST.indexOf(g.phase),
     si: g.setupIdx,
     lv: g.lastSetupVertex == null ? -1 : vI[g.lastSetupVertex],
@@ -695,6 +707,7 @@ function unpack(o) {
     longestRoadLen: o.ll,
     largestArmy: o.la < 0 ? null : o.la,
     turn: o.tu, turnNo: o.tn,
+    rolls: o.rl ? o.rl.split(",").map(Number) : [],
     phase: PH_LIST[o.ph],
     setupOrder: order, setupIdx: o.si,
     lastSetupVertex: o.lv < 0 ? null : VIDX[o.lv],
@@ -813,6 +826,19 @@ function Btn({ children, onClick, disabled, tone = "plain", style }) {
     }}>{children}</button>
   );
 }
+function Die({ n, hot }) {
+  const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
+  return (
+    <span style={{ display: "inline-grid", gridTemplate: "repeat(3,1fr)/repeat(3,1fr)", width: 28, height: 28,
+      background: "#f2ead6", borderRadius: 6, padding: 4, boxSizing: "border-box", gap: 1,
+      border: "1px solid rgba(6,20,25,.45)", boxShadow: "0 1px 2px rgba(0,0,0,.4)" }}>
+      {Array.from({ length: 9 }, (_, i) => (
+        <span key={i} style={{ borderRadius: "50%", background: PIPS[n].includes(i) ? (hot ? C.rust : "#20262b") : "transparent" }} />
+      ))}
+    </span>
+  );
+}
+
 function Eyebrow({ children }) {
   return <div style={{ fontFamily: dispFont, fontSize: 10, letterSpacing: ".22em",
     textTransform: "uppercase", color: C.parchDim, marginBottom: 6 }}>{children}</div>;
@@ -822,7 +848,7 @@ function Chip({ res, n }) {
     <span style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,.05)",
       border: `1px solid ${C.line}`, borderRadius: 4, padding: "3px 7px", fontFamily: dispFont,
       fontSize: 13, color: C.parch, letterSpacing: ".04em" }}>
-      <span style={{ width: 8, height: 8, borderRadius: 2, background: RES_COLOR[res] }} />
+      <span>{RES_ICON[res]}</span>
       {RES_LABEL[res]} <b style={{ fontWeight: 600 }}>{n}</b>
     </span>
   );
@@ -832,7 +858,7 @@ function ResStepper({ value, max, onChange }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {RES.map((r) => (
         <div key={r} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ width: 10, height: 10, borderRadius: 2, background: RES_COLOR[r] }} />
+          <span style={{ fontSize: 15 }}>{RES_ICON[r]}</span>
           <span style={{ flex: 1, fontFamily: dispFont, fontSize: 13, color: C.parch, letterSpacing: ".05em" }}>
             {RES_LABEL[r]}<span style={{ color: C.parchDim, fontSize: 11 }}> / {max[r] ?? 0}</span>
           </span>
@@ -917,6 +943,10 @@ function Board({ g, sel, onPick }) {
         return (
           <g key={h.id}>
             <polygon points={pts} fill={HEX_FILL[h.terrain]} stroke="rgba(6,20,25,.55)" strokeWidth="0.6" />
+            {b.robber !== h.id && (
+              <text x={h.cx} y={h.cy - 4.9} textAnchor="middle" fontSize="4"
+                style={{ pointerEvents: "none" }}>{TERRAIN_ICON[h.terrain]}</text>
+            )}
             {h.number && (
               <g>
                 <circle cx={h.cx} cy={h.cy} r="4.1" fill="#f2ead6" stroke="rgba(6,20,25,.35)" strokeWidth="0.4" />
@@ -1075,7 +1105,14 @@ export default function App() {
       }
       d.seq = (d.seq || 0) + 1;
       const r = await serverPut(d);
-      if (r.ok) { setG(d); setSel(null); setNote(""); return true; }
+      if (r.ok) {
+        if (d._stole) {
+          setNote(`You stole 1 ${RES_LABEL[d._stole.res].toLowerCase()} ${RES_ICON[d._stole.res]} from ${d._stole.from}.`);
+          delete d._stole;
+        } else setNote("");
+        setG(d); setSel(null);
+        return true;
+      }
       if (r.conflict) {
         try { latest = await decodeGame(r.conflict.blob); } catch { return false; }
         setG(latest);
@@ -1300,6 +1337,7 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={{ fontFamily: dispFont, fontSize: 13, letterSpacing: ".28em", color: C.parchDim }}>HARBOR · {g.code}</div>
           <div style={{ display: "flex", gap: 6 }}>
+            <Btn onClick={() => setModal({ k: "rolls" })} style={{ padding: "5px 9px", fontSize: 11 }}>Rolls</Btn>
             <Btn onClick={() => setModal({ k: "log" })} style={{ padding: "5px 9px", fontSize: 11 }}>Log</Btn>
             <Btn onClick={share} style={{ padding: "5px 9px", fontSize: 11 }}>Invite</Btn>
           </div>
@@ -1336,11 +1374,25 @@ export default function App() {
       <Board g={g} sel={effSel} onPick={onPick} />
 
       <div style={{ padding: "10px 14px", borderTop: `1px solid ${C.line}`, borderBottom: `1px solid ${C.line}` }}>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-          {g.dice && <span style={{ fontFamily: dispFont, fontSize: 26,
-            color: g.dice[0] + g.dice[1] === 7 ? C.rust : C.gold }}>{g.dice[0] + g.dice[1]}</span>}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {g.dice && (
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
+              <Die n={g.dice[0]} hot={g.dice[0] + g.dice[1] === 7} />
+              <Die n={g.dice[1]} hot={g.dice[0] + g.dice[1] === 7} />
+              <span style={{ fontFamily: dispFont, fontSize: 24, marginLeft: 3,
+                color: g.dice[0] + g.dice[1] === 7 ? C.rust : C.gold }}>{g.dice[0] + g.dice[1]}</span>
+            </span>
+          )}
           <span style={{ fontSize: 15, lineHeight: 1.4 }}>{status}</span>
         </div>
+        {g.rolls.length > 1 && (
+          <div onClick={() => setModal({ k: "rolls" })} style={{ marginTop: 6, color: C.parchDim, fontSize: 12,
+            fontFamily: dispFont, letterSpacing: ".08em", cursor: "pointer" }}>
+            LAST ROLLS · {g.rolls.slice(-8).reverse().map((n, i) => (
+              <span key={i} style={{ color: n === 7 ? C.rust : i === 0 ? C.gold : C.parchDim, marginRight: 6 }}>{n}</span>
+            ))}
+          </div>
+        )}
         {note && <div style={{ marginTop: 6, color: "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
       </div>
 
@@ -1543,6 +1595,51 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
     );
   }
 
+  if (modal.k === "rolls") {
+    const counts = {};
+    for (let n = 2; n <= 12; n++) counts[n] = 0;
+    g.rolls.forEach((n) => { counts[n] += 1; });
+    const maxC = Math.max(1, ...Object.values(counts));
+    const hot = g.rolls.length ? +Object.keys(counts).reduce((a, b) => (counts[b] > counts[a] ? b : a)) : null;
+    return (
+      <Sheet title={`Rolls — ${g.rolls.length} so far`} onClose={close}>
+        {g.rolls.length === 0 && <div style={{ color: C.parchDim, fontSize: 14 }}>No dice have been rolled yet.</div>}
+        {g.rolls.length > 0 && (
+          <>
+            <Eyebrow>Most recent first</Eyebrow>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 16 }}>
+              {g.rolls.slice(-24).reverse().map((n, i) => (
+                <span key={i} style={{ width: 30, height: 30, display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  borderRadius: "50%", fontFamily: dispFont, fontSize: 14,
+                  border: `1px solid ${n === 7 ? C.rust : C.line}`,
+                  background: i === 0 ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+                  color: n === 7 ? C.rust : i === 0 ? C.gold : C.parch }}>{n}</span>
+              ))}
+            </div>
+            <Eyebrow>Hot and cold</Eyebrow>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              {Array.from({ length: 11 }, (_, i) => i + 2).map((n) => (
+                <div key={n} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ width: 20, textAlign: "right", fontFamily: dispFont, fontSize: 13,
+                    color: n === 7 ? C.rust : n === hot && counts[n] > 0 ? C.gold : C.parch }}>{n}</span>
+                  <div style={{ flex: 1, height: 14, background: "rgba(255,255,255,.04)", borderRadius: 3, overflow: "hidden" }}>
+                    <div style={{ width: `${(counts[n] / maxC) * 100}%`, height: "100%",
+                      background: n === 7 ? "rgba(164,85,61,.75)" : n === hot && counts[n] > 0 ? C.gold : "rgba(239,230,210,.35)" }} />
+                  </div>
+                  <span style={{ width: 22, fontFamily: dispFont, fontSize: 12, color: counts[n] ? C.parch : "rgba(239,230,210,.3)" }}>
+                    {counts[n] || "—"}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 12, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
+              {hot != null && counts[hot] > 0 ? `${hot} is running hot. ` : ""}The dice owe nobody anything.
+            </div>
+          </>
+        )}
+      </Sheet>
+    );
+  }
+
   if (modal.k === "discard") {
     const total = handTotal(pick);
     return (
@@ -1569,7 +1666,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
                 border: `1px solid ${value === r ? C.gold : C.line}`, borderRadius: 5, padding: "8px 10px",
                 color: dis ? "rgba(239,230,210,.25)" : C.parch, fontFamily: dispFont, fontSize: 12,
                 letterSpacing: ".06em", cursor: dis ? "default" : "pointer" }}>
-                <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: 2, background: RES_COLOR[r], marginRight: 5 }} />
+                <span style={{ marginRight: 5 }}>{RES_ICON[r]}</span>
                 {RES_LABEL[r]}{showRate && <span style={{ color: C.parchDim }}> {tradeRate(g, actor, r)}:1</span>}
               </button>
             );
@@ -1652,7 +1749,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         <div style={{ color: C.parchDim, fontSize: 14, marginBottom: 12 }}>Name a resource. Everyone hands you all of theirs.</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {RES.map((r) => (
-            <Btn key={r} onClick={() => { apply((d) => playDev(d, actor, modal.idx, r)); close(); }}>{RES_LABEL[r]}</Btn>
+            <Btn key={r} onClick={() => { apply((d) => playDev(d, actor, modal.idx, r)); close(); }}>{RES_ICON[r]} {RES_LABEL[r]}</Btn>
           ))}
         </div>
       </Sheet>

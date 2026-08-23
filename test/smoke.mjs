@@ -164,6 +164,16 @@ check("sevens were resolved from each phone", sevens === 0 || discards >= sevens
 check("no phone was ever asked to send a link", !sawHandoffScreen);
 check("every phone still shows a coherent board", phones.every((w) => H(w).includes("<svg") && H(w).includes("HARBOR · " + code)));
 
+// ---- roll history travels through the codec and shows hot/cold ----
+check("recent rolls strip shows on a synced phone", H(phones[1]).includes("LAST ROLLS"));
+{
+  click(phones[1], "Rolls");
+  const opened = await wait(phones[1], (x) => H(x).includes("Hot and cold"));
+  check("rolls sheet shows the hot and cold board", opened && / — \d+ so far/.test(H(phones[1])));
+  click(phones[1], "×");
+  await sleep(120);
+}
+
 // ---- the server copy stays URL-blob sized ----
 const stored = await (await fetch(BASE + "api/g/" + code)).json();
 check("server state blob stays small", stored.blob.length > 0 && stored.blob.length < 2000);
