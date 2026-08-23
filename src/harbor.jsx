@@ -310,9 +310,9 @@ const DEV_TEXT = {
 function newGame(code, names) {
   const board = makeBoard();
   const n = names.length;
-  const order = [];
-  for (let i = 0; i < n; i++) order.push(i);
-  for (let i = n - 1; i >= 0; i--) order.push(i);
+  /* who goes first is random — the creator gets no edge */
+  const base = shuffle(Array.from({ length: n }, (_, i) => i));
+  const order = [...base, ...base.slice().reverse()];
   return {
     v: 1,
     code,
@@ -593,7 +593,9 @@ function endTurn(g) {
     say(g, `${pname(g, p)} reached 10 points and wins.`);
     return g;
   }
-  g.turn = (g.turn + 1) % g.players.length;
+  /* play proceeds in the drafted order, not seat order */
+  const base = g.setupOrder.slice(0, g.players.length);
+  g.turn = base[(base.indexOf(g.turn) + 1) % base.length];
   g.turnNo += 1;
   g.phase = "roll";
   g.dice = null;
@@ -651,6 +653,7 @@ function pack(g) {
     ll: g.longestRoadLen,
     la: g.largestArmy == null ? -1 : g.largestArmy,
     tu: g.turn, tn: g.turnNo,
+    so: g.setupOrder.slice(0, g.players.length).join(""),
     rl: g.rolls.join(","),
     ph: PH_LIST.indexOf(g.phase),
     si: g.setupIdx,
@@ -686,9 +689,9 @@ function unpack(o) {
   const pendingDiscard = {};
   for (let i = 0; i < o.pd.length; i += 2) pendingDiscard[o.pd[i]] = o.pd[i + 1];
   const n = o.n.length;
-  const order = [];
-  for (let i = 0; i < n; i++) order.push(i);
-  for (let i = n - 1; i >= 0; i--) order.push(i);
+  /* legacy blobs predate the shuffled order and used seat order */
+  const base = o.so ? [...o.so].map(Number) : Array.from({ length: n }, (_, i) => i);
+  const order = [...base, ...base.slice().reverse()];
 
   const g = {
     v: 1, code: o.c,

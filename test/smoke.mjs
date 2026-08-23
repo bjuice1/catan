@@ -79,7 +79,8 @@ setInput(A, A.document.querySelector("input"), "Ann");
 await sleep(80);
 click(A, "Create game");
 await wait(A, (x) => H(x).includes("<svg"));
-check("creator lands on the board with seat 0", H(A).includes("Your turn, Ann"));
+// first player is randomized, so Ann is either up or watching
+check("creator lands on the board with seat 0", /Your turn, Ann|you're Ann/.test(H(A)));
 const code = (H(A).match(/HARBOR · ([A-Z0-9]{4})/) || [])[1];
 check("game code is visible in the header", !!code);
 
@@ -121,9 +122,19 @@ for (let s = 0; s < 8; s++) {
   await sleep(200);
   noHandoffs();
 }
-check("snake draft order is A B C D D C B A", order.join("") === "AnnBenCalDotDotCalBenAnn");
+// order is randomized per game, but must be a snake: P then P reversed,
+// where P is a permutation of all four names
+const half = order.slice(0, 4);
+check("draft order is a permutation of all four players",
+  [...half].sort().join() === ["Ann", "Ben", "Cal", "Dot"].sort().join());
+check("draft snakes back in reverse", order.join() === [...half, ...[...half].reverse()].join());
 check("setup completes into the roll phase",
   await wait(phones[0], () => phones.some((w) => btn(w, "Roll the dice")), 6000));
+{
+  const roller = phones.find((w) => btn(w, "Roll the dice"));
+  check("the draft's first player also rolls first",
+    !!roller && (H(roller).match(/Your turn, ([A-Za-z]+)/) || [])[1] === half[0]);
+}
 
 // ---- turns: each phone acts on its own, server carries the moves ----
 let passes = 0, sevens = 0, discards = 0, robbers = 0;
@@ -316,7 +327,9 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     const rd = roadPicks(w); tap(w, rd[Math.floor(Math.random() * rd.length)]);
     await sleep(200);
   }
-  check("two-player snake draft is A B B A", order2.join("") === "UnoDuoDuoUno");
+  check("two-player draft is a randomized snake",
+    [...order2.slice(0, 2)].sort().join() === "Duo,Uno" &&
+    order2.join() === [order2[0], order2[1], order2[1], order2[0]].join());
   check("two-player setup reaches the roll phase",
     await wait(E, () => pair.some((w) => btn(w, "Roll the dice")), 6000));
 }
