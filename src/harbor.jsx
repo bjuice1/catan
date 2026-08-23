@@ -934,6 +934,7 @@ function Sheet({ title, onClose, children, footer }) {
       display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.line}`,
         borderBottom: "none", borderRadius: "10px 10px 0 0", width: "100%", maxWidth: 520, padding: 16,
+        paddingBottom: "calc(16px + env(safe-area-inset-bottom))",
         maxHeight: "82vh", overflowY: "auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
           <div style={{ fontFamily: dispFont, fontSize: 15, letterSpacing: ".12em", textTransform: "uppercase", color: C.parch }}>{title}</div>

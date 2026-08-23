@@ -36,7 +36,8 @@ const html = `<!DOCTYPE html>
 <title>Harbor</title>
 <style>
   html,body{margin:0;padding:0;background:#061419;-webkit-text-size-adjust:100%;}
-  #root{min-height:100vh;max-width:560px;margin:0 auto;}
+  #root{min-height:100vh;max-width:560px;margin:0 auto;
+    padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);}
   *{-webkit-tap-highlight-color:transparent;}
   input,textarea{font-size:16px;}
 </style>
