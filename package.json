@@ -1,0 +1,13 @@
+{
+  "name": "harbor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Untimed play-by-link settlers game",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
