@@ -1,0 +1,1465 @@
+import React, { useState, useEffect, useMemo } from "react";
+
+/* ============================================================
+   HARBOR — an untimed, play-by-turn settlers game for 4 friends
+   Everyone opens the same link. State lives in shared storage.
+   ============================================================ */
+
+const RES = ["brick", "lumber", "wool", "grain", "ore"];
+const RES_LABEL = { brick: "Brick", lumber: "Lumber", wool: "Wool", grain: "Grain", ore: "Ore" };
+const TERRAIN_RES = {
+  hills: "brick", forest: "lumber", pasture: "wool",
+  fields: "grain", mountains: "ore", desert: null,
+};
+const HEX_FILL = {
+  hills: "#a8563a", forest: "#2e5a3b", pasture: "#8fae57",
+  fields: "#d7a83a", mountains: "#69727e", desert: "#cdbb8d",
+};
+const RES_COLOR = {
+  brick: "#a8563a", lumber: "#2e5a3b", wool: "#8fae57",
+  grain: "#d7a83a", ore: "#69727e",
+};
+const PC = [
+  { name: "Red", hex: "#c2412d" },
+  { name: "Blue", hex: "#3b7fb0" },
+  { name: "Orange", hex: "#dd8a2a" },
+  { name: "Bone", hex: "#e9e4d6" },
+];
+const C = {
+  sea: "#0e2a35", seaDeep: "#071c25", ink: "#061419",
+  parch: "#efe6d2", parchDim: "#bfb69f", line: "#1e4a5a",
+  gold: "#e0a437", rust: "#c05a3f", panel: "#0c2129",
+};
+
+const COST = {
+  road: { brick: 1, lumber: 1 },
+  settlement: { brick: 1, lumber: 1, wool: 1, grain: 1 },
+  city: { grain: 2, ore: 3 },
+  dev: { wool: 1, grain: 1, ore: 1 },
+};
+const LIMIT = { road: 15, settlement: 5, city: 4 };
+const SIZE = 10;
+const HW = Math.sqrt(3) * SIZE;
+
+/* ---------- small utils ---------- */
+const clone = (o) => JSON.parse(JSON.stringify(o));
+const shuffle = (a) => {
+  const r = a.slice();
+  for (let i = r.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [r[i], r[j]] = [r[j], r[i]];
+  }
+  return r;
+};
+const emptyHand = () => ({ brick: 0, lumber: 0, wool: 0, grain: 0, ore: 0 });
+const handTotal = (h) => RES.reduce((s, r) => s + (h[r] || 0), 0);
+const pips = (n) => 6 - Math.abs(7 - n);
+const snap = (n) => { const v = Math.round(n * 10) / 10; return (Object.is(v, -0) ? 0 : v).toFixed(1); };
+const vid = (x, y) => `${snap(x)}:${snap(y)}`;
+const eid = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+const ends = (e) => e.split("|");
+
+/* ---------- board generation ---------- */
+function hexCorners(cx, cy) {
+  const out = [];
+  for (let i = 0; i < 6; i++) {
+    const a = (Math.PI / 180) * (60 * i - 90);
+    out.push([cx + SIZE * Math.cos(a), cy + SIZE * Math.sin(a)]);
+  }
+  return out;
+}
+
+function baseGeometry() {
+  const rows = [3, 4, 5, 4, 3];
+  const hexes = [];
+  rows.forEach((n, r) => {
+    const y = (r - 2) * 1.5 * SIZE;
+    const x0 = (-(n - 1) / 2) * HW;
+    for (let i = 0; i < n; i++) {
+      hexes.push({ id: `h${hexes.length}`, cx: x0 + i * HW, cy: y, corners: [], verts: [] });
+    }
+  });
+
+  const vertexHexes = {};
+  const vertexPos = {};
+  const edgeHexes = {};
+
+  hexes.forEach((h) => {
+    const cs = hexCorners(h.cx, h.cy);
+    h.corners = cs;
+    h.verts = cs.map(([x, y]) => {
+      const id = vid(x, y);
+      vertexPos[id] = { x, y };
+      (vertexHexes[id] = vertexHexes[id] || []).push(h.id);
+      return id;
+    });
+    for (let i = 0; i < 6; i++) {
+      const e = eid(h.verts[i], h.verts[(i + 1) % 6]);
+      (edgeHexes[e] = edgeHexes[e] || []).push(h.id);
+    }
+  });
+
+  const vertexEdges = {};
+  Object.keys(edgeHexes).forEach((e) => {
+    const [a, b] = ends(e);
+    (vertexEdges[a] = vertexEdges[a] || []).push(e);
+    (vertexEdges[b] = vertexEdges[b] || []).push(e);
+  });
+
+  // coastal edges, ordered around the ring
+  const coast = Object.keys(edgeHexes)
+    .filter((e) => edgeHexes[e].length === 1)
+    .map((e) => {
+      const [a, b] = ends(e);
+      const mx = (vertexPos[a].x + vertexPos[b].x) / 2;
+      const my = (vertexPos[a].y + vertexPos[b].y) / 2;
+      return { e, ang: Math.atan2(my, mx), mx, my };
+    })
+    .sort((p, q) => p.ang - q.ang);
+
+  return { hexes, vertexPos, vertexHexes, vertexEdges, edgeHexes, coast };
+}
+
+const GEO = baseGeometry();
+
+function hexNeighbors(hexes) {
+  const nb = {};
+  hexes.forEach((a) => {
+    nb[a.id] = [];
+    hexes.forEach((b) => {
+      if (a.id === b.id) return;
+      const shared = a.verts.filter((v) => b.verts.includes(v)).length;
+      if (shared === 2) nb[a.id].push(b.id);
+    });
+  });
+  return nb;
+}
+const HEX_NB = hexNeighbors(GEO.hexes);
+
+function makeBoard() {
+  const terrain = shuffle([
+    ...Array(4).fill("forest"), ...Array(4).fill("pasture"), ...Array(4).fill("fields"),
+    ...Array(3).fill("hills"), ...Array(3).fill("mountains"), "desert",
+  ]);
+  const tokens = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
+
+  let hexes = null;
+  for (let attempt = 0; attempt < 800; attempt++) {
+    const t = attempt === 0 ? terrain : shuffle(terrain);
+    const nums = shuffle(tokens);
+    let k = 0;
+    const cand = GEO.hexes.map((h, i) => ({
+      id: h.id, cx: h.cx, cy: h.cy, verts: h.verts,
+      terrain: t[i],
+      number: t[i] === "desert" ? null : nums[k++],
+    }));
+    const byId = Object.fromEntries(cand.map((h) => [h.id, h]));
+    const bad = cand.some((h) =>
+      HEX_NB[h.id].some((n) => {
+        const o = byId[n];
+        if (!h.number || !o.number) return false;
+        const red = (x) => x === 6 || x === 8;
+        return (red(h.number) && red(o.number)) || h.number === o.number;
+      })
+    );
+    if (!bad) { hexes = cand; break; }
+    if (attempt === 799) hexes = cand;
+  }
+
+  const portTypes = shuffle(["any", "any", "any", "any", "brick", "lumber", "wool", "grain", "ore"]);
+  const slots = [0, 3, 7, 10, 13, 17, 20, 23, 27];
+  const ports = slots.map((s, i) => {
+    const c = GEO.coast[s % GEO.coast.length];
+    const [a, b] = ends(c.e);
+    return { type: portTypes[i], edge: c.e, verts: [a, b], mx: c.mx, my: c.my };
+  });
+
+  return {
+    hexes,
+    ports,
+    robber: hexes.find((h) => h.terrain === "desert").id,
+  };
+}
+
+/* ---------- board lookups ---------- */
+const hexById = (board, id) => board.hexes.find((h) => h.id === id);
+const vertexHexIds = (v) => GEO.vertexHexes[v] || [];
+const vertexNeighborVerts = (v) =>
+  (GEO.vertexEdges[v] || []).map((e) => { const [a, b] = ends(e); return a === v ? b : a; });
+
+/* ---------- placement legality ---------- */
+function canPlaceSettlement(g, v, p, setup) {
+  if (g.buildings[v]) return false;
+  if (vertexNeighborVerts(v).some((n) => g.buildings[n])) return false;
+  if (setup) return true;
+  return (GEO.vertexEdges[v] || []).some((e) => g.roads[e] === p);
+}
+function canPlaceRoad(g, e, p, restrictVertex) {
+  if (g.roads[e] !== undefined) return false;
+  const [a, b] = ends(e);
+  if (restrictVertex) return a === restrictVertex || b === restrictVertex;
+  const touches = (v) => {
+    const b2 = g.buildings[v];
+    if (b2 && b2.owner === p) return true;
+    if (b2 && b2.owner !== p) return false; // can't build through an opponent's town
+    return (GEO.vertexEdges[v] || []).some((x) => g.roads[x] === p);
+  };
+  return touches(a) || touches(b);
+}
+const legalSettlements = (g, p, setup) =>
+  Object.keys(GEO.vertexPos).filter((v) => canPlaceSettlement(g, v, p, setup));
+const legalCities = (g, p) =>
+  Object.keys(g.buildings).filter((v) => g.buildings[v].owner === p && g.buildings[v].type === "settlement");
+const legalRoads = (g, p, restrictVertex) =>
+  Object.keys(GEO.edgeHexes).filter((e) => canPlaceRoad(g, e, p, restrictVertex));
+
+/* ---------- economy ---------- */
+const canAfford = (hand, cost) => Object.keys(cost).every((r) => (hand[r] || 0) >= cost[r]);
+const pay = (hand, cost) => { Object.keys(cost).forEach((r) => (hand[r] -= cost[r])); };
+const countOwned = (g, p, type) =>
+  type === "road"
+    ? Object.values(g.roads).filter((o) => o === p).length
+    : Object.values(g.buildings).filter((b) => b.owner === p && b.type === type).length;
+
+function portsFor(g, p) {
+  const owned = Object.keys(g.buildings).filter((v) => g.buildings[v].owner === p);
+  const out = new Set();
+  g.board.ports.forEach((pt) => { if (pt.verts.some((v) => owned.includes(v))) out.add(pt.type); });
+  return out;
+}
+function tradeRate(g, p, res) {
+  const ports = portsFor(g, p);
+  if (ports.has(res)) return 2;
+  if (ports.has("any")) return 3;
+  return 4;
+}
+
+/* ---------- longest road ---------- */
+function longestRoadFor(g, p) {
+  const mine = Object.keys(g.roads).filter((e) => g.roads[e] === p);
+  if (!mine.length) return 0;
+  const vE = {};
+  mine.forEach((e) => { const [a, b] = ends(e); (vE[a] = vE[a] || []).push(e); (vE[b] = vE[b] || []).push(e); });
+  const blocked = (v) => { const b = g.buildings[v]; return !!b && b.owner !== p; };
+  let best = 0;
+  const walk = (v, used, start) => {
+    if (used.size > best) best = used.size;
+    if (!start && blocked(v)) return;
+    for (const e of vE[v] || []) {
+      if (used.has(e)) continue;
+      const [a, b] = ends(e);
+      used.add(e);
+      walk(a === v ? b : a, used, false);
+      used.delete(e);
+    }
+  };
+  mine.forEach((e) => { const [a, b] = ends(e); walk(a, new Set(), true); walk(b, new Set(), true); });
+  return best;
+}
+
+function recomputeAwards(g) {
+  // longest road: 5+, challenger must beat the holder outright
+  let holder = g.longestRoad;
+  g.players.forEach((_, i) => { g.roadLen[i] = longestRoadFor(g, i); });
+  let len = holder == null ? 4 : g.roadLen[holder];
+  g.players.forEach((_, i) => {
+    if (i !== holder && g.roadLen[i] >= 5 && g.roadLen[i] > len) { holder = i; len = g.roadLen[i]; }
+  });
+  if (holder != null && g.roadLen[holder] < 5) { holder = null; len = 4; }
+  g.longestRoad = holder;
+  g.longestRoadLen = holder == null ? 0 : g.roadLen[holder];
+
+  let ah = g.largestArmy;
+  let an = ah == null ? 2 : g.knights[ah];
+  g.players.forEach((_, i) => { if (g.knights[i] >= 3 && g.knights[i] > an) { ah = i; an = g.knights[i]; } });
+  g.largestArmy = ah;
+}
+
+function scoreFor(g, i, includeHidden) {
+  let s = countOwned(g, i, "settlement") + countOwned(g, i, "city") * 2;
+  if (g.longestRoad === i) s += 2;
+  if (g.largestArmy === i) s += 2;
+  if (includeHidden) s += (g.devHands[i] || []).filter((c) => c.type === "vp").length;
+  return s;
+}
+
+/* ---------- dev deck ---------- */
+const makeDevDeck = () =>
+  shuffle([
+    ...Array(14).fill("knight"),
+    ...Array(5).fill("vp"),
+    ...Array(2).fill("road"),
+    ...Array(2).fill("plenty"),
+    ...Array(2).fill("monopoly"),
+  ]);
+const DEV_LABEL = {
+  knight: "Knight", vp: "Victory point", road: "Road building",
+  plenty: "Year of plenty", monopoly: "Monopoly",
+};
+const DEV_TEXT = {
+  knight: "Move the robber, then steal a card.",
+  vp: "Worth 1 point. Stays hidden until you win.",
+  road: "Build 2 roads for free.",
+  plenty: "Take any 2 resources from the bank.",
+  monopoly: "Name a resource. Everyone hands you all of theirs.",
+};
+
+/* ---------- game creation ---------- */
+function newGame(code, names) {
+  const board = makeBoard();
+  const n = names.length;
+  const order = [];
+  for (let i = 0; i < n; i++) order.push(i);
+  for (let i = n - 1; i >= 0; i--) order.push(i);
+  return {
+    v: 1,
+    code,
+    createdAt: Date.now(),
+    players: names.map((nm, i) => ({ name: nm, color: i })),
+    board,
+    buildings: {},
+    roads: {},
+    hands: names.map(() => emptyHand()),
+    devHands: names.map(() => []),
+    devDeck: makeDevDeck(),
+    bank: { brick: 19, lumber: 19, wool: 19, grain: 19, ore: 19 },
+    knights: names.map(() => 0),
+    roadLen: names.map(() => 0),
+    longestRoad: null,
+    longestRoadLen: 0,
+    largestArmy: null,
+    turn: order[0],
+    turnNo: 0,
+    phase: "setupTown",
+    setupOrder: order,
+    setupIdx: 0,
+    lastSetupVertex: null,
+    dice: null,
+    pendingDiscard: {},
+    stealFrom: [],
+    robberReturn: "main",
+    freeRoads: 0,
+    devPlayed: false,
+    trade: null,
+    winner: null,
+    log: [{ t: Date.now(), m: "Game created. Place your first town." }],
+  };
+}
+
+const say = (g, m) => { g.log.push({ t: Date.now(), m }); if (g.log.length > 120) g.log = g.log.slice(-120); };
+const pname = (g, i) => g.players[i]?.name ?? "?";
+
+/* ---------- setup phase ---------- */
+function placeSetupTown(g, v, p) {
+  g.buildings[v] = { owner: p, type: "settlement" };
+  g.lastSetupVertex = v;
+  g.phase = "setupRoad";
+  say(g, `${pname(g, p)} founded a town.`);
+  if (g.setupIdx >= g.players.length) {
+    vertexHexIds(v).forEach((hid) => {
+      const h = hexById(g.board, hid);
+      const r = TERRAIN_RES[h.terrain];
+      if (r && g.bank[r] > 0) { g.hands[p][r] += 1; g.bank[r] -= 1; }
+    });
+    say(g, `${pname(g, p)} collected from the surrounding land.`);
+  }
+  return g;
+}
+function placeSetupRoad(g, e, p) {
+  g.roads[e] = p;
+  g.setupIdx += 1;
+  g.lastSetupVertex = null;
+  if (g.setupIdx >= g.setupOrder.length) {
+    recomputeAwards(g);
+    g.turn = g.setupOrder[0];
+    g.turnNo = 1;
+    g.phase = "roll";
+    say(g, `Setup complete. ${pname(g, g.turn)} rolls first.`);
+  } else {
+    g.turn = g.setupOrder[g.setupIdx];
+    g.phase = "setupTown";
+  }
+  return g;
+}
+
+/* ---------- rolling & production ---------- */
+function distribute(g, roll) {
+  const claims = {}; // res -> [{p, n}]
+  g.board.hexes.forEach((h) => {
+    if (h.number !== roll || g.board.robber === h.id) return;
+    const r = TERRAIN_RES[h.terrain];
+    if (!r) return;
+    h.verts.forEach((v) => {
+      const b = g.buildings[v];
+      if (!b) return;
+      (claims[r] = claims[r] || []).push({ p: b.owner, n: b.type === "city" ? 2 : 1 });
+    });
+  });
+  const gained = {};
+  Object.keys(claims).forEach((r) => {
+    const list = claims[r];
+    const need = list.reduce((s, c) => s + c.n, 0);
+    const owners = new Set(list.map((c) => c.p));
+    if (need > g.bank[r] && owners.size > 1) {
+      say(g, `The bank is out of ${RES_LABEL[r].toLowerCase()} — nobody collects it.`);
+      return;
+    }
+    list.forEach((c) => {
+      const amt = Math.min(c.n, g.bank[r]);
+      if (amt <= 0) return;
+      g.hands[c.p][r] += amt;
+      g.bank[r] -= amt;
+      gained[c.p] = gained[c.p] || {};
+      gained[c.p][r] = (gained[c.p][r] || 0) + amt;
+    });
+  });
+  const parts = Object.keys(gained).map(
+    (p) => `${pname(g, +p)} +${Object.entries(gained[p]).map(([r, n]) => `${n} ${RES_LABEL[r].toLowerCase()}`).join(", ")}`
+  );
+  say(g, parts.length ? parts.join(" · ") : "Nobody collected anything.");
+}
+
+function rollDice(g) {
+  const d1 = 1 + Math.floor(Math.random() * 6);
+  const d2 = 1 + Math.floor(Math.random() * 6);
+  g.dice = [d1, d2];
+  const sum = d1 + d2;
+  say(g, `${pname(g, g.turn)} rolled ${sum} (${d1}+${d2}).`);
+  if (sum === 7) {
+    const pend = {};
+    g.hands.forEach((h, i) => { const t = handTotal(h); if (t > 7) pend[i] = Math.floor(t / 2); });
+    g.pendingDiscard = pend;
+    g.robberReturn = "main";
+    if (Object.keys(pend).length) {
+      g.phase = "discard";
+      say(g, `Seven — ${Object.keys(pend).map((i) => pname(g, +i)).join(", ")} must discard.`);
+    } else {
+      g.phase = "robber";
+      say(g, "Seven — move the robber.");
+    }
+  } else {
+    distribute(g, sum);
+    g.phase = "main";
+  }
+  return g;
+}
+
+function doDiscard(g, p, sel) {
+  RES.forEach((r) => { g.hands[p][r] -= sel[r] || 0; g.bank[r] += sel[r] || 0; });
+  delete g.pendingDiscard[p];
+  say(g, `${pname(g, p)} discarded ${handTotal(sel)}.`);
+  if (!Object.keys(g.pendingDiscard).length) {
+    g.phase = "robber";
+    say(g, `${pname(g, g.turn)} moves the robber.`);
+  }
+  return g;
+}
+
+function moveRobber(g, hid, p) {
+  g.board.robber = hid;
+  const h = hexById(g.board, hid);
+  const victims = new Set();
+  h.verts.forEach((v) => {
+    const b = g.buildings[v];
+    if (b && b.owner !== p && handTotal(g.hands[b.owner]) > 0) victims.add(b.owner);
+  });
+  g.stealFrom = [...victims];
+  say(g, `${pname(g, p)} moved the robber.`);
+  if (g.stealFrom.length === 1) return stealFrom(g, g.stealFrom[0], p);
+  if (g.stealFrom.length === 0) { g.phase = g.robberReturn; return g; }
+  g.phase = "steal";
+  return g;
+}
+
+function stealFrom(g, victim, p) {
+  const pool = [];
+  RES.forEach((r) => { for (let i = 0; i < g.hands[victim][r]; i++) pool.push(r); });
+  if (pool.length) {
+    const r = pool[Math.floor(Math.random() * pool.length)];
+    g.hands[victim][r] -= 1;
+    g.hands[p][r] += 1;
+    say(g, `${pname(g, p)} stole a card from ${pname(g, victim)}.`);
+  }
+  g.stealFrom = [];
+  g.phase = g.robberReturn;
+  return g;
+}
+
+/* ---------- building ---------- */
+function buildRoad(g, e, p) {
+  const free = g.freeRoads > 0;
+  if (free) {
+    g.freeRoads -= 1;
+  } else {
+    pay(g.hands[p], COST.road);
+    RES.forEach((r) => { g.bank[r] += COST.road[r] || 0; });
+  }
+  g.roads[e] = p;
+  recomputeAwards(g);
+  say(g, `${pname(g, p)} built a road${free ? " (free)" : ""}.`);
+  return g;
+}
+function buildTown(g, v, p) {
+  pay(g.hands[p], COST.settlement);
+  RES.forEach((r) => { g.bank[r] += COST.settlement[r] || 0; });
+  g.buildings[v] = { owner: p, type: "settlement" };
+  recomputeAwards(g);
+  say(g, `${pname(g, p)} built a town.`);
+  return g;
+}
+function buildCity(g, v, p) {
+  pay(g.hands[p], COST.city);
+  RES.forEach((r) => { g.bank[r] += COST.city[r] || 0; });
+  g.buildings[v] = { owner: p, type: "city" };
+  say(g, `${pname(g, p)} upgraded to a city.`);
+  return g;
+}
+function buyDev(g, p) {
+  pay(g.hands[p], COST.dev);
+  RES.forEach((r) => { g.bank[r] += COST.dev[r] || 0; });
+  const card = g.devDeck.pop();
+  g.devHands[p].push({ type: card, turn: g.turnNo, used: false });
+  say(g, `${pname(g, p)} bought a development card.`);
+  return g;
+}
+
+/* ---------- development cards ---------- */
+function playDev(g, p, idx, payload) {
+  const card = g.devHands[p][idx];
+  card.used = true;
+  g.devPlayed = true;
+  if (card.type === "knight") {
+    g.knights[p] += 1;
+    recomputeAwards(g);
+    g.robberReturn = g.phase === "roll" ? "roll" : "main";
+    g.phase = "robber";
+    say(g, `${pname(g, p)} played a knight.`);
+  } else if (card.type === "road") {
+    g.freeRoads = 2;
+    say(g, `${pname(g, p)} played road building.`);
+  } else if (card.type === "plenty") {
+    payload.forEach((r) => { if (g.bank[r] > 0) { g.bank[r] -= 1; g.hands[p][r] += 1; } });
+    say(g, `${pname(g, p)} took ${payload.map((r) => RES_LABEL[r].toLowerCase()).join(" and ")}.`);
+  } else if (card.type === "monopoly") {
+    const r = payload;
+    let got = 0;
+    g.hands.forEach((h, i) => { if (i !== p) { got += h[r]; h[r] = 0; } });
+    g.hands[p][r] += got;
+    say(g, `${pname(g, p)} monopolised ${RES_LABEL[r].toLowerCase()} and took ${got}.`);
+  }
+  return g;
+}
+
+/* ---------- trading ---------- */
+function bankTrade(g, p, give, want) {
+  const rate = tradeRate(g, p, give);
+  g.hands[p][give] -= rate;
+  g.bank[give] += rate;
+  g.hands[p][want] += 1;
+  g.bank[want] -= 1;
+  say(g, `${pname(g, p)} traded ${rate} ${RES_LABEL[give].toLowerCase()} for 1 ${RES_LABEL[want].toLowerCase()}.`);
+  return g;
+}
+function settleTrade(g, withPlayer) {
+  const t = g.trade;
+  const a = t.from, b = withPlayer;
+  RES.forEach((r) => {
+    g.hands[a][r] -= t.give[r] || 0; g.hands[b][r] += t.give[r] || 0;
+    g.hands[b][r] -= t.want[r] || 0; g.hands[a][r] += t.want[r] || 0;
+  });
+  say(g, `${pname(g, a)} and ${pname(g, b)} traded.`);
+  g.trade = null;
+  return g;
+}
+
+/* ---------- turn end / win ---------- */
+function endTurn(g) {
+  const p = g.turn;
+  if (scoreFor(g, p, true) >= 10) {
+    g.winner = p;
+    g.phase = "over";
+    say(g, `${pname(g, p)} reached 10 points and wins.`);
+    return g;
+  }
+  g.turn = (g.turn + 1) % g.players.length;
+  g.turnNo += 1;
+  g.phase = "roll";
+  g.dice = null;
+  g.devPlayed = false;
+  g.freeRoads = 0;
+  g.trade = null;
+  return g;
+}
+
+
+/* ============================================================
+   Codec — the whole game squeezed into a URL
+   ============================================================ */
+const T_LIST = ["hills", "forest", "pasture", "fields", "mountains", "desert"];
+const P_LIST = ["any", "brick", "lumber", "wool", "grain", "ore"];
+const D_LIST = ["knight", "vp", "road", "plenty", "monopoly"];
+const PH_LIST = ["setupTown", "setupRoad", "roll", "main", "discard", "robber", "steal", "over"];
+
+const VIDX = Object.keys(GEO.vertexPos).sort();
+const EIDX = Object.keys(GEO.edgeHexes).sort();
+const vI = Object.fromEntries(VIDX.map((v, i) => [v, i]));
+const eI = Object.fromEntries(EIDX.map((e, i) => [e, i]));
+const hI = Object.fromEntries(GEO.hexes.map((h, i) => [h.id, i]));
+
+function makeCode4() {
+  const A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  return Array.from({ length: 4 }, () => A[Math.floor(Math.random() * A.length)]).join("");
+}
+
+function pack(g) {
+  const flatB = [];
+  Object.entries(g.buildings).forEach(([v, b]) => flatB.push(vI[v], b.owner, b.type === "city" ? 1 : 0));
+  const flatR = [];
+  Object.entries(g.roads).forEach(([e, o]) => flatR.push(eI[e], o));
+  const flatPD = [];
+  Object.entries(g.pendingDiscard).forEach(([p, n]) => flatPD.push(+p, n));
+  return {
+    c: g.code,
+    n: g.players.map((p) => p.name),
+    t: g.board.hexes.map((h) => T_LIST.indexOf(h.terrain)).join(""),
+    m: g.board.hexes.map((h) => h.number || 0).join(","),
+    rb: hI[g.board.robber],
+    pt: g.board.ports.map((p) => P_LIST.indexOf(p.type)).join(""),
+    b: flatB,
+    r: flatR,
+    h: g.hands.map((x) => RES.map((r) => x[r])),
+    bk: RES.map((r) => g.bank[r]),
+    dh: g.devHands.map((cards) => cards.map((c) => [D_LIST.indexOf(c.type), c.turn, c.used ? 1 : 0])),
+    dd: g.devDeck.map((d) => D_LIST.indexOf(d)).join(""),
+    kn: g.knights,
+    lr: g.longestRoad == null ? -1 : g.longestRoad,
+    ll: g.longestRoadLen,
+    la: g.largestArmy == null ? -1 : g.largestArmy,
+    tu: g.turn, tn: g.turnNo,
+    ph: PH_LIST.indexOf(g.phase),
+    si: g.setupIdx,
+    lv: g.lastSetupVertex == null ? -1 : vI[g.lastSetupVertex],
+    d: g.dice || 0,
+    pd: flatPD,
+    sf: g.stealFrom,
+    rr: PH_LIST.indexOf(g.robberReturn),
+    fr: g.freeRoads,
+    dp: g.devPlayed ? 1 : 0,
+    w: g.winner == null ? -1 : g.winner,
+    lg: g.log.slice(-5).map((l) => l.m),
+  };
+}
+
+function unpack(o) {
+  const nums = o.m.split(",").map(Number);
+  const hexes = GEO.hexes.map((h, i) => ({
+    id: h.id, cx: h.cx, cy: h.cy, verts: h.verts,
+    terrain: T_LIST[+o.t[i]],
+    number: nums[i] || null,
+  }));
+  const slots = [0, 3, 7, 10, 13, 17, 20, 23, 27];
+  const ports = slots.map((s, i) => {
+    const c = GEO.coast[s % GEO.coast.length];
+    const [a, b] = ends(c.e);
+    return { type: P_LIST[+o.pt[i]], edge: c.e, verts: [a, b], mx: c.mx, my: c.my };
+  });
+  const buildings = {};
+  for (let i = 0; i < o.b.length; i += 3) buildings[VIDX[o.b[i]]] = { owner: o.b[i + 1], type: o.b[i + 2] ? "city" : "settlement" };
+  const roads = {};
+  for (let i = 0; i < o.r.length; i += 2) roads[EIDX[o.r[i]]] = o.r[i + 1];
+  const pendingDiscard = {};
+  for (let i = 0; i < o.pd.length; i += 2) pendingDiscard[o.pd[i]] = o.pd[i + 1];
+  const n = o.n.length;
+  const order = [];
+  for (let i = 0; i < n; i++) order.push(i);
+  for (let i = n - 1; i >= 0; i--) order.push(i);
+
+  const g = {
+    v: 1, code: o.c,
+    players: o.n.map((nm, i) => ({ name: nm, color: i })),
+    board: { hexes, ports, robber: GEO.hexes[o.rb].id },
+    buildings, roads,
+    hands: o.h.map((x) => Object.fromEntries(RES.map((r, i) => [r, x[i]]))),
+    bank: Object.fromEntries(RES.map((r, i) => [r, o.bk[i]])),
+    devHands: o.dh.map((cards) => cards.map((c) => ({ type: D_LIST[c[0]], turn: c[1], used: !!c[2] }))),
+    devDeck: o.dd.split("").map((d) => D_LIST[+d]),
+    knights: o.kn,
+    roadLen: o.n.map(() => 0),
+    longestRoad: o.lr < 0 ? null : o.lr,
+    longestRoadLen: o.ll,
+    largestArmy: o.la < 0 ? null : o.la,
+    turn: o.tu, turnNo: o.tn,
+    phase: PH_LIST[o.ph],
+    setupOrder: order, setupIdx: o.si,
+    lastSetupVertex: o.lv < 0 ? null : VIDX[o.lv],
+    dice: o.d || null,
+    pendingDiscard,
+    stealFrom: o.sf,
+    robberReturn: PH_LIST[o.rr],
+    freeRoads: o.fr,
+    devPlayed: !!o.dp,
+    trade: null,
+    winner: o.w < 0 ? null : o.w,
+    log: o.lg.map((m) => ({ t: 0, m })),
+  };
+  g.players.forEach((_, i) => { g.roadLen[i] = longestRoadFor(g, i); });
+  return g;
+}
+
+/* gzip via CompressionStream, with a plain-base64 fallback */
+const b64url = (bytes) => {
+  let s = "";
+  bytes.forEach((b) => { s += String.fromCharCode(b); });
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+};
+const unb64url = (str) => {
+  const s = str.replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(s + "=".repeat((4 - (s.length % 4)) % 4));
+  return Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
+};
+
+async function encodeGame(g) {
+  const json = JSON.stringify(pack(g));
+  if (typeof CompressionStream === "undefined") return "u" + b64url(new TextEncoder().encode(json));
+  const cs = new CompressionStream("gzip");
+  const w = cs.writable.getWriter();
+  w.write(new TextEncoder().encode(json)); w.close();
+  const buf = await new Response(cs.readable).arrayBuffer();
+  return "z" + b64url(new Uint8Array(buf));
+}
+async function decodeGame(str) {
+  const tag = str[0], body = unb64url(str.slice(1));
+  let json;
+  if (tag === "z") {
+    const ds = new DecompressionStream("gzip");
+    const w = ds.writable.getWriter();
+    w.write(body); w.close();
+    json = await new Response(ds.readable).text();
+  } else {
+    json = new TextDecoder().decode(body);
+  }
+  return unpack(JSON.parse(json));
+}
+
+/* ============================================================
+   UI
+   ============================================================ */
+const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;500;600&family=Spectral:ital,wght@0,400;0,600;1,400&display=swap');`;
+const dispFont = "'Oswald', 'Helvetica Neue', sans-serif";
+const bodyFont = "'Spectral', Georgia, serif";
+
+function Btn({ children, onClick, disabled, tone = "plain", style }) {
+  const tones = {
+    plain: { bg: "rgba(255,255,255,.06)", fg: C.parch, bd: C.line },
+    go: { bg: C.gold, fg: "#20160a", bd: C.gold },
+    warn: { bg: "rgba(192,90,63,.18)", fg: "#f0b9a8", bd: "#7a3527" },
+  };
+  const t = tones[tone];
+  return (
+    <button onClick={onClick} disabled={disabled} style={{
+      background: disabled ? "rgba(255,255,255,.03)" : t.bg,
+      color: disabled ? "rgba(239,230,210,.28)" : t.fg,
+      border: `1px solid ${disabled ? "rgba(255,255,255,.07)" : t.bd}`,
+      borderRadius: 5, padding: "9px 12px", fontFamily: dispFont, fontSize: 13,
+      letterSpacing: ".06em", textTransform: "uppercase", cursor: disabled ? "default" : "pointer",
+      WebkitTapHighlightColor: "transparent", ...style,
+    }}>{children}</button>
+  );
+}
+function Eyebrow({ children }) {
+  return <div style={{ fontFamily: dispFont, fontSize: 10, letterSpacing: ".22em",
+    textTransform: "uppercase", color: C.parchDim, marginBottom: 6 }}>{children}</div>;
+}
+function Chip({ res, n }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,.05)",
+      border: `1px solid ${C.line}`, borderRadius: 4, padding: "3px 7px", fontFamily: dispFont,
+      fontSize: 13, color: C.parch, letterSpacing: ".04em" }}>
+      <span style={{ width: 8, height: 8, borderRadius: 2, background: RES_COLOR[res] }} />
+      {RES_LABEL[res]} <b style={{ fontWeight: 600 }}>{n}</b>
+    </span>
+  );
+}
+function ResStepper({ value, max, onChange }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      {RES.map((r) => (
+        <div key={r} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ width: 10, height: 10, borderRadius: 2, background: RES_COLOR[r] }} />
+          <span style={{ flex: 1, fontFamily: dispFont, fontSize: 13, color: C.parch, letterSpacing: ".05em" }}>
+            {RES_LABEL[r]}<span style={{ color: C.parchDim, fontSize: 11 }}> / {max[r] ?? 0}</span>
+          </span>
+          <Btn onClick={() => onChange(r, Math.max(0, (value[r] || 0) - 1))} disabled={(value[r] || 0) <= 0} style={{ padding: "4px 11px" }}>−</Btn>
+          <span style={{ width: 22, textAlign: "center", fontFamily: dispFont, fontSize: 16, color: C.parch }}>{value[r] || 0}</span>
+          <Btn onClick={() => onChange(r, (value[r] || 0) + 1)} disabled={(value[r] || 0) >= (max[r] ?? 0)} style={{ padding: "4px 11px" }}>+</Btn>
+        </div>
+      ))}
+    </div>
+  );
+}
+function Sheet({ title, onClose, children, footer }) {
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(4,12,16,.7)", zIndex: 60,
+      display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: C.panel, border: `1px solid ${C.line}`,
+        borderBottom: "none", borderRadius: "10px 10px 0 0", width: "100%", maxWidth: 520, padding: 16,
+        maxHeight: "82vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontFamily: dispFont, fontSize: 15, letterSpacing: ".12em", textTransform: "uppercase", color: C.parch }}>{title}</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: C.parchDim, fontSize: 22, cursor: "pointer" }}>×</button>
+        </div>
+        {children}
+        {footer && <div style={{ marginTop: 14, display: "flex", gap: 8 }}>{footer}</div>}
+      </div>
+    </div>
+  );
+}
+function BuildRow({ label, cost, note, disabled, active, onClick }) {
+  return (
+    <button onClick={disabled ? undefined : onClick} disabled={disabled} style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between", textAlign: "left",
+      background: active ? "rgba(224,164,55,.14)" : "rgba(255,255,255,.04)",
+      border: `1px solid ${active ? C.gold : C.line}`, borderRadius: 6, padding: "10px 12px",
+      opacity: disabled ? 0.38 : 1, cursor: disabled ? "default" : "pointer", width: "100%" }}>
+      <span>
+        <span style={{ fontFamily: dispFont, fontSize: 14, letterSpacing: ".1em", textTransform: "uppercase", color: C.parch }}>{label}</span>
+        <span style={{ display: "block", color: C.parchDim, fontSize: 12, fontFamily: bodyFont }}>{cost}</span>
+      </span>
+      <span style={{ color: C.parchDim, fontFamily: dispFont, fontSize: 12 }}>{note}</span>
+    </button>
+  );
+}
+
+/* board is unchanged from the shared-storage build */
+function Board({ g, sel, onPick }) {
+  const b = g.board;
+  const opts = sel ? sel.options : null;
+  const roadPath = (e) => {
+    const [a, c] = ends(e);
+    const p1 = GEO.vertexPos[a], p2 = GEO.vertexPos[c];
+    const dx = p2.x - p1.x, dy = p2.y - p1.y;
+    return { x1: p1.x + dx * 0.16, y1: p1.y + dy * 0.16, x2: p2.x - dx * 0.16, y2: p2.y - dy * 0.16 };
+  };
+  return (
+    <svg viewBox="-58 -54 116 108" preserveAspectRatio="xMidYMid meet"
+      style={{ width: "100%", maxHeight: "52vh", display: "block", margin: "0 auto" }}>
+      <defs>
+        <radialGradient id="seaG" cx="50%" cy="45%" r="70%">
+          <stop offset="0%" stopColor={C.sea} /><stop offset="100%" stopColor={C.seaDeep} />
+        </radialGradient>
+      </defs>
+      <rect x="-58" y="-54" width="116" height="108" fill="url(#seaG)" />
+      {b.ports.map((pt, i) => {
+        const len = Math.hypot(pt.mx, pt.my) || 1;
+        const px = pt.mx + (pt.mx / len) * 6.2, py = pt.my + (pt.my / len) * 6.2;
+        return (
+          <g key={i}>
+            {pt.verts.map((v) => (
+              <line key={v} x1={px} y1={py} x2={GEO.vertexPos[v].x} y2={GEO.vertexPos[v].y}
+                stroke="rgba(224,164,55,.35)" strokeWidth="0.5" strokeDasharray="1.4 1" />
+            ))}
+            <circle cx={px} cy={py} r="3.6" fill={C.seaDeep} stroke={pt.type === "any" ? C.gold : RES_COLOR[pt.type]} strokeWidth="0.9" />
+            <text x={px} y={py + 1.3} textAnchor="middle" fontSize="3.2" fontFamily={dispFont} fontWeight="600"
+              fill={pt.type === "any" ? C.gold : RES_COLOR[pt.type]}>{pt.type === "any" ? "3:1" : "2:1"}</text>
+          </g>
+        );
+      })}
+      {b.hexes.map((h) => {
+        const pts = hexCorners(h.cx, h.cy).map((p) => p.join(",")).join(" ");
+        const target = sel && sel.kind === "robber" && opts.has(h.id);
+        return (
+          <g key={h.id}>
+            <polygon points={pts} fill={HEX_FILL[h.terrain]} stroke="rgba(6,20,25,.55)" strokeWidth="0.6" />
+            {h.number && (
+              <g>
+                <circle cx={h.cx} cy={h.cy} r="4.1" fill="#f2ead6" stroke="rgba(6,20,25,.35)" strokeWidth="0.4" />
+                <text x={h.cx} y={h.cy + 0.4} textAnchor="middle" fontSize="4.4" fontFamily={dispFont} fontWeight="600"
+                  fill={pips(h.number) === 5 ? C.rust : "#2a2118"}>{h.number}</text>
+                <text x={h.cx} y={h.cy + 3.3} textAnchor="middle" fontSize="2.6"
+                  fill={pips(h.number) === 5 ? C.rust : "#5c5041"}>{"•".repeat(pips(h.number))}</text>
+              </g>
+            )}
+            {b.robber === h.id && (
+              <g>
+                <ellipse cx={h.cx} cy={h.cy - 5.6} rx="2.2" ry="2.9" fill="#141414" stroke="#000" strokeWidth="0.3" />
+                <circle cx={h.cx} cy={h.cy - 8.3} r="1.5" fill="#141414" />
+              </g>
+            )}
+            {target && <polygon points={pts} fill="rgba(224,164,55,.22)" stroke={C.gold} strokeWidth="0.9"
+              style={{ cursor: "pointer" }} onClick={() => onPick(h.id)} />}
+          </g>
+        );
+      })}
+      {Object.entries(g.roads).map(([e, owner]) => {
+        const r = roadPath(e);
+        return <line key={e} x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={PC[g.players[owner].color].hex}
+          strokeWidth="2.1" strokeLinecap="round" />;
+      })}
+      {Object.entries(g.buildings).map(([v, bl]) => {
+        const p = GEO.vertexPos[v];
+        const col = PC[g.players[bl.owner].color].hex;
+        return bl.type === "settlement" ? (
+          <polygon key={v} points={`${p.x - 2},${p.y + 2} ${p.x - 2},${p.y - 0.6} ${p.x},${p.y - 2.6} ${p.x + 2},${p.y - 0.6} ${p.x + 2},${p.y + 2}`}
+            fill={col} stroke="rgba(6,20,25,.75)" strokeWidth="0.45" />
+        ) : (
+          <g key={v}>
+            <rect x={p.x - 2.8} y={p.y - 1.2} width="5.6" height="3.4" fill={col} stroke="rgba(6,20,25,.75)" strokeWidth="0.45" />
+            <polygon points={`${p.x - 2.8},${p.y - 1.2} ${p.x},${p.y - 3.6} ${p.x + 2.8},${p.y - 1.2}`}
+              fill={col} stroke="rgba(6,20,25,.75)" strokeWidth="0.45" />
+          </g>
+        );
+      })}
+      {sel && sel.kind === "road" && [...opts].map((e) => {
+        const r = roadPath(e);
+        return (
+          <g key={e}>
+            <line x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={C.gold} strokeWidth="1.1" opacity="0.75" strokeDasharray="1.6 1.2" />
+            <line x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke="transparent" strokeWidth="6"
+              style={{ cursor: "pointer" }} onClick={() => onPick(e)} />
+          </g>
+        );
+      })}
+      {sel && (sel.kind === "town" || sel.kind === "city") && [...opts].map((v) => {
+        const p = GEO.vertexPos[v];
+        return (
+          <g key={v}>
+            <circle cx={p.x} cy={p.y} r="2.4" fill="rgba(224,164,55,.3)" stroke={C.gold} strokeWidth="0.8" />
+            <circle cx={p.x} cy={p.y} r="5.2" fill="transparent" style={{ cursor: "pointer" }} onClick={() => onPick(v)} />
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/* ============================================================
+   App — the link is the save file
+   ============================================================ */
+const actorOf = (g) => {
+  if (g.winner != null) return g.turn;
+  if (g.phase === "discard") return +Object.keys(g.pendingDiscard)[0];
+  return g.turn;
+};
+
+export default function App() {
+  const [g, setG] = useState(null);
+  const [link, setLink] = useState("");
+  const [passTo, setPassTo] = useState(null);
+  const [solo, setSolo] = useState(false);
+  const [sel, setSel] = useState(null);
+  const [modal, setModal] = useState(null);
+  const [tab, setTab] = useState("build");
+  const [note, setNote] = useState("");
+  const [names, setNames] = useState(["", "", "", ""]);
+  const [booting, setBooting] = useState(true);
+
+  /* load from the URL */
+  useEffect(() => {
+    (async () => {
+      const h = window.location.hash.replace(/^#/, "");
+      if (h) {
+        try {
+          const loaded = await decodeGame(h);
+          setG(loaded);
+          setLink(window.location.href);
+        } catch {
+          setNote("That link is damaged — the game state couldn't be read. Ask whoever sent it for the previous link.");
+        }
+      }
+      setBooting(false);
+    })();
+  }, []);
+
+  const publish = async (next) => {
+    const blob = await encodeGame(next);
+    const base = window.location.href.split("#")[0];
+    const url = base + "#" + blob;
+    try {
+      window.history.replaceState(null, "", "#" + blob);
+    } catch {
+      // file:// and sandboxed frames refuse replaceState; a plain fragment set still works
+      try { window.location.hash = blob; } catch { /* nothing else to try */ }
+    }
+    setLink(url);
+    return url;
+  };
+
+  const apply = async (fn) => {
+    const before = g ? actorOf(g) : null;
+    const d = clone(g);
+    const out = fn(d);
+    if (out === false) return;
+    if (d.phase !== "over" && scoreFor(d, d.turn, true) >= 10) {
+      d.winner = d.turn; d.phase = "over";
+      say(d, `${pname(d, d.turn)} reached 10 points and wins.`);
+    }
+    setG(d); setSel(null); setNote("");
+    await publish(d);
+    const after = actorOf(d);
+    // a win always interrupts; otherwise only nag when we're actually passing devices
+    if (d.winner != null) setPassTo(after);
+    else if (after !== before && !solo) setPassTo(after);
+  };
+
+  const share = async (url, msg) => {
+    try {
+      if (navigator.share) { await navigator.share({ text: msg, url }); return; }
+      await navigator.clipboard.writeText(msg + " " + url);
+      setNote("Copied. Paste it in the group chat.");
+    } catch { setNote("Couldn't copy — long-press the link box and copy it by hand."); }
+  };
+
+  /* ---- new game ---- */
+  const create = async () => {
+    const clean = names.map((n, i) => n.trim() || `Player ${i + 1}`);
+    const game = newGame(makeCode4(), clean);
+    setG(game);
+    await publish(game);
+    setPassTo(actorOf(game));
+  };
+
+  if (booting) return <div style={{ background: C.ink, minHeight: "100vh" }} />;
+
+  /* ---- HOME ---- */
+  if (!g) {
+    return (
+      <div style={{ minHeight: "100vh", background: C.ink, color: C.parch, fontFamily: bodyFont, padding: "28px 18px 60px" }}>
+        <style>{FONTS}</style>
+        <div style={{ maxWidth: 520, margin: "0 auto" }}>
+          <div style={{ fontFamily: dispFont, fontWeight: 300, fontSize: 44, letterSpacing: ".26em", lineHeight: 1 }}>HARBOR</div>
+          <div style={{ color: C.parchDim, marginTop: 10, fontSize: 15, fontStyle: "italic" }}>
+            Four settlers, one island, no clock. The link is the game — pass it around the group chat.
+          </div>
+          <div style={{ marginTop: 26, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
+            <Eyebrow>Start a new island</Eyebrow>
+            {names.map((n, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                <span style={{ width: 12, height: 12, borderRadius: 3, background: PC[i].hex, border: "1px solid rgba(0,0,0,.4)" }} />
+                <input value={n} placeholder={`${PC[i].name} — name`}
+                  onChange={(e) => { const c = names.slice(); c[i] = e.target.value; setNames(c); }}
+                  style={{ flex: 1, background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4,
+                    padding: "9px 10px", color: C.parch, fontFamily: bodyFont, fontSize: 15 }} />
+              </div>
+            ))}
+            <Btn tone="go" onClick={create} style={{ width: "100%", marginTop: 6 }}>Create game</Btn>
+          </div>
+          {note && <div style={{ marginTop: 16, color: "#f0b9a8", lineHeight: 1.5 }}>{note}</div>}
+          <div style={{ marginTop: 26, color: C.parchDim, fontSize: 13, lineHeight: 1.65 }}>
+            No accounts, no server, nothing saved anywhere. The whole game lives inside the link, so whoever holds
+            the newest link holds the game. Take your turn, send the new link on, and don't delete the thread.
+            <br /><br />
+            Because the state travels in the link, anyone who really wants to can read everyone's hand out of it.
+            Play with people you trust.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ---- derived ---- */
+  const actor = actorOf(g);
+  const hand = g.hands[actor];
+  const owed = g.pendingDiscard[actor] || 0;
+  const myTurn = g.turn === actor && !g.winner;
+  const canBuy = (k) => canAfford(hand, COST[k]);
+  const devPlayable = (c) => myTurn && (g.phase === "main" || g.phase === "roll") && !g.devPlayed && c.turn < g.turnNo && !c.used && c.type !== "vp";
+  const startBuild = (kind) => {
+    if (kind === "road") setSel({ kind: "road", options: new Set(legalRoads(g, actor, null)) });
+    if (kind === "town") setSel({ kind: "town", options: new Set(legalSettlements(g, actor, false)) });
+    if (kind === "city") setSel({ kind: "city", options: new Set(legalCities(g, actor)) });
+  };
+  /* setup and robber placement highlight themselves; build modes are chosen by tapping a button */
+  const autoSel = (() => {
+    if (g.winner != null) return null;
+    if (g.phase === "setupTown") return { kind: "town", options: new Set(legalSettlements(g, actor, true)) };
+    if (g.phase === "setupRoad") return { kind: "road", options: new Set(legalRoads(g, actor, g.lastSetupVertex)) };
+    if (g.phase === "robber") return { kind: "robber", options: new Set(g.board.hexes.filter((h) => h.id !== g.board.robber).map((h) => h.id)) };
+    return null;
+  })();
+  const effSel = autoSel || (g.phase === "main" ? sel : null);
+
+  const onPick = (id) => {
+    if (!effSel) return;
+    if (effSel.kind === "robber") return apply((d) => moveRobber(d, id, actor));
+    if (g.phase === "setupTown") return apply((d) => placeSetupTown(d, id, actor));
+    if (g.phase === "setupRoad") return apply((d) => placeSetupRoad(d, id, actor));
+    if (effSel.kind === "road") return apply((d) => buildRoad(d, id, actor));
+    if (effSel.kind === "town") return apply((d) => buildTown(d, id, actor));
+    if (effSel.kind === "city") return apply((d) => buildCity(d, id, actor));
+  };
+
+  const status = (() => {
+    if (g.winner != null) return `${pname(g, g.winner)} wins with ${scoreFor(g, g.winner, true)} points.`;
+    switch (g.phase) {
+      case "setupTown": return "Tap a highlighted corner to found a town.";
+      case "setupRoad": return "Now lay a road beside it.";
+      case "roll": return "Roll the dice to start your turn.";
+      case "discard": return `You rolled into a seven — discard ${owed} cards.`;
+      case "robber": return "Tap a hex to move the robber.";
+      case "steal": return "Choose someone to rob.";
+      case "main": return "Build, trade, or end the turn.";
+      default: return "";
+    }
+  })();
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.ink, color: C.parch, fontFamily: bodyFont, paddingBottom: 24 }}>
+      <style>{FONTS}</style>
+
+      {/* pass-the-link gate */}
+      {passTo != null && (
+        <div style={{ position: "fixed", inset: 0, background: C.ink, zIndex: 80, padding: "34px 18px", overflowY: "auto" }}>
+          <div style={{ maxWidth: 460, margin: "0 auto" }}>
+            <Eyebrow>Game {g.code}</Eyebrow>
+            <div style={{ fontFamily: dispFont, fontSize: 30, letterSpacing: ".08em", lineHeight: 1.15, marginBottom: 6 }}>
+              {g.winner != null ? `${pname(g, g.winner).toUpperCase()} WINS` : `SEND THIS TO ${pname(g, passTo).toUpperCase()}`}
+            </div>
+            <div style={{ color: C.parchDim, fontSize: 15, lineHeight: 1.55, marginBottom: 18 }}>
+              {g.winner != null
+                ? "Send the final link so everyone can see the board."
+                : g.phase === "discard"
+                  ? `They owe ${g.pendingDiscard[passTo]} cards from the seven. Nothing moves until they do it.`
+                  : "This link is the game. If it doesn't get sent, the game stops here."}
+            </div>
+            <Btn tone="go" style={{ width: "100%", padding: "15px", fontSize: 16 }}
+              onClick={() => share(link, `${pname(g, passTo)} — you're up in Harbor (game ${g.code}).`)}>
+              Send the link
+            </Btn>
+            <div style={{ marginTop: 12, background: "rgba(255,255,255,.04)", border: `1px solid ${C.line}`,
+              borderRadius: 5, padding: 10, fontFamily: "monospace", fontSize: 10, wordBreak: "break-all",
+              color: C.parchDim, maxHeight: 90, overflowY: "auto" }}>{link}</div>
+            <Btn style={{ width: "100%", marginTop: 12 }}
+              onClick={() => { if (g.winner == null) setSolo(true); setPassTo(null); }}>
+              {g.winner != null ? "Look at the final board" : "We're on one phone — stop asking"}
+            </Btn>
+            {note && <div style={{ marginTop: 12, color: "#f0b9a8", fontSize: 13 }}>{note}</div>}
+          </div>
+        </div>
+      )}
+
+      {/* header */}
+      <div style={{ padding: "12px 14px 8px", borderBottom: `1px solid ${C.line}` }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ fontFamily: dispFont, fontSize: 13, letterSpacing: ".28em", color: C.parchDim }}>HARBOR · {g.code}</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <Btn onClick={() => setModal({ k: "log" })} style={{ padding: "5px 9px", fontSize: 11 }}>Log</Btn>
+            <Btn tone={solo ? "go" : "plain"} onClick={() => setPassTo(actor)}
+              style={{ padding: "5px 9px", fontSize: 11 }}>Hand off</Btn>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+          {g.players.map((p, i) => (
+            <div key={i} style={{ flex: 1, border: `1px solid ${i === actor && !g.winner ? C.gold : C.line}`,
+              background: i === actor && !g.winner ? "rgba(224,164,55,.09)" : "rgba(255,255,255,.02)",
+              borderRadius: 5, padding: "6px 5px", textAlign: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: PC[p.color].hex }} />
+                <span style={{ fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 58 }}>{p.name}</span>
+              </div>
+              <div style={{ fontFamily: dispFont, fontSize: 19, lineHeight: 1.15 }}>{scoreFor(g, i, i === actor)}</div>
+              <div style={{ fontSize: 10, color: C.parchDim, fontFamily: dispFont, letterSpacing: ".06em" }}>
+                {handTotal(g.hands[i])}c · {g.devHands[i].filter((c) => !c.used).length}d
+                {g.longestRoad === i ? " · LR" : ""}{g.largestArmy === i ? " · LA" : ""}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* who's holding it */}
+      {g.winner == null && (
+        <div style={{ padding: "8px 14px", background: "rgba(224,164,55,.1)", borderBottom: `1px solid ${C.line}`,
+          fontFamily: dispFont, fontSize: 12, letterSpacing: ".12em", textTransform: "uppercase", color: C.gold }}>
+          {solo ? `${pname(g, actor)}'s turn — pass the phone` : `You're playing as ${pname(g, actor)}`}
+        </div>
+      )}
+
+      <Board g={g} sel={effSel} onPick={onPick} />
+
+      <div style={{ padding: "10px 14px", borderTop: `1px solid ${C.line}`, borderBottom: `1px solid ${C.line}` }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+          {g.dice && <span style={{ fontFamily: dispFont, fontSize: 26,
+            color: g.dice[0] + g.dice[1] === 7 ? C.rust : C.gold }}>{g.dice[0] + g.dice[1]}</span>}
+          <span style={{ fontSize: 15, lineHeight: 1.4 }}>{status}</span>
+        </div>
+        {note && <div style={{ marginTop: 6, color: "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
+      </div>
+
+      <div style={{ padding: "12px 14px" }}>
+        {g.winner != null && (
+          <div style={{ border: `1px solid ${C.gold}`, borderRadius: 7, padding: 14, marginBottom: 12, background: "rgba(224,164,55,.1)" }}>
+            <div style={{ fontFamily: dispFont, fontSize: 22, letterSpacing: ".12em" }}>{pname(g, g.winner).toUpperCase()} WINS</div>
+          </div>
+        )}
+
+        {owed > 0 && (
+          <Btn tone="warn" style={{ width: "100%", marginBottom: 10 }}
+            onClick={() => setModal({ k: "discard" })}>Discard {owed} cards</Btn>
+        )}
+
+        {myTurn && g.phase === "steal" && (
+          <div style={{ marginBottom: 12 }}>
+            <Eyebrow>Rob one of them</Eyebrow>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {g.stealFrom.map((i) => (
+                <Btn key={i} tone="warn" onClick={() => apply((d) => stealFrom(d, i, actor))}>
+                  {pname(g, i)} ({handTotal(g.hands[i])})
+                </Btn>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {myTurn && g.phase === "roll" && (
+          <Btn tone="go" style={{ width: "100%", padding: "14px", fontSize: 16 }}
+            onClick={() => apply((d) => rollDice(d))}>Roll the dice</Btn>
+        )}
+
+        {myTurn && g.phase === "main" && (
+          <>
+            <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+              {["build", "trade", "cards"].map((t) => (
+                <button key={t} onClick={() => setTab(t)} style={{ flex: 1,
+                  background: tab === t ? "rgba(224,164,55,.14)" : "rgba(255,255,255,.03)",
+                  border: `1px solid ${tab === t ? C.gold : C.line}`, color: tab === t ? C.gold : C.parchDim,
+                  borderRadius: 5, padding: "8px", fontFamily: dispFont, fontSize: 12,
+                  letterSpacing: ".14em", textTransform: "uppercase", cursor: "pointer" }}>{t}</button>
+              ))}
+            </div>
+
+            {tab === "build" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {g.freeRoads > 0 && <div style={{ color: C.gold, fontSize: 13 }}>Road building: {g.freeRoads} free left.</div>}
+                <BuildRow label="Road" cost="1 brick · 1 lumber" note={`${countOwned(g, actor, "road")}/15`}
+                  disabled={(!canBuy("road") && !g.freeRoads) || countOwned(g, actor, "road") >= LIMIT.road || !legalRoads(g, actor, null).length}
+                  active={sel?.kind === "road"} onClick={() => startBuild("road")} />
+                <BuildRow label="Town" cost="1 brick · 1 lumber · 1 wool · 1 grain" note={`${countOwned(g, actor, "settlement")}/5`}
+                  disabled={!canBuy("settlement") || countOwned(g, actor, "settlement") >= LIMIT.settlement || !legalSettlements(g, actor, false).length}
+                  active={sel?.kind === "town"} onClick={() => startBuild("town")} />
+                <BuildRow label="City" cost="2 grain · 3 ore" note={`${countOwned(g, actor, "city")}/4`}
+                  disabled={!canBuy("city") || countOwned(g, actor, "city") >= LIMIT.city || !legalCities(g, actor).length}
+                  active={sel?.kind === "city"} onClick={() => startBuild("city")} />
+                <BuildRow label="Development card" cost="1 wool · 1 grain · 1 ore" note={`${g.devDeck.length} left`}
+                  disabled={!canBuy("dev") || !g.devDeck.length} onClick={() => apply((d) => buyDev(d, actor))} />
+                {sel && <div style={{ color: C.gold, fontSize: 13 }}>Tap a highlighted spot on the board.</div>}
+              </div>
+            )}
+
+            {tab === "trade" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <Btn onClick={() => setModal({ k: "bank" })} disabled={handTotal(hand) < 2}>Trade with the bank</Btn>
+                <Btn onClick={() => setModal({ k: "swap", with: null })}>Record a trade with a player</Btn>
+                <div style={{ color: C.parchDim, fontSize: 13, lineHeight: 1.55 }}>
+                  Haggle in the group chat, then record what you agreed. It checks both hands before it goes through.
+                </div>
+                <div style={{ color: C.parchDim, fontSize: 13 }}>
+                  Your rates: {RES.map((r) => `${RES_LABEL[r]} ${tradeRate(g, actor, r)}:1`).join(" · ")}
+                </div>
+              </div>
+            )}
+
+            {tab === "cards" && <DevList g={g} actor={actor} devPlayable={devPlayable} apply={apply} setModal={setModal} />}
+
+            <Btn tone="warn" style={{ width: "100%", marginTop: 14 }}
+              onClick={() => apply((d) => endTurn(d))}>End turn</Btn>
+          </>
+        )}
+
+        {myTurn && g.phase === "roll" && g.devHands[actor].some(devPlayable) && (
+          <div style={{ marginTop: 12 }}>
+            <Eyebrow>You may play a card before rolling</Eyebrow>
+            <DevList g={g} actor={actor} devPlayable={devPlayable} apply={apply} setModal={setModal} />
+          </div>
+        )}
+
+        <div style={{ marginTop: 18, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
+          <Eyebrow>{pname(g, actor)}'s hand — {handTotal(hand)} cards</Eyebrow>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {RES.map((r) => <Chip key={r} res={r} n={hand[r]} />)}
+          </div>
+          {g.devHands[actor].filter((c) => !c.used).length > 0 && (
+            <div style={{ marginTop: 8, color: C.parchDim, fontSize: 13 }}>
+              Cards: {g.devHands[actor].filter((c) => !c.used).map((c) => DEV_LABEL[c.type]).join(", ")}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {modal && <Modals modal={modal} setModal={setModal} g={g} actor={actor} hand={hand} apply={apply} owed={owed} setNote={setNote} />}
+    </div>
+  );
+}
+
+function DevList({ g, actor, devPlayable, apply, setModal }) {
+  const cards = g.devHands[actor].filter((c) => !c.used);
+  if (!cards.length) return <div style={{ color: C.parchDim, fontSize: 14 }}>No development cards.</div>;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {cards.map((c, i) => {
+        const idx = g.devHands[actor].indexOf(c);
+        const ok = devPlayable(c);
+        return (
+          <div key={i} style={{ border: `1px solid ${C.line}`, borderRadius: 6, padding: "10px 12px" }}>
+            <div style={{ fontFamily: dispFont, fontSize: 14, letterSpacing: ".1em", textTransform: "uppercase" }}>{DEV_LABEL[c.type]}</div>
+            <div style={{ color: C.parchDim, fontSize: 13, margin: "3px 0 8px" }}>{DEV_TEXT[c.type]}</div>
+            {c.type !== "vp" && (
+              <Btn disabled={!ok} onClick={() => {
+                if (c.type === "plenty") return setModal({ k: "plenty", idx });
+                if (c.type === "monopoly") return setModal({ k: "monopoly", idx });
+                apply((d) => playDev(d, actor, idx, null));
+              }}>{ok ? "Play" : c.turn >= g.turnNo ? "Bought this turn" : "Not now"}</Btn>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
+  const [pick, setPick] = useState(emptyHand());
+  const [give, setGive] = useState(emptyHand());
+  const [want, setWant] = useState(emptyHand());
+  const [plenty, setPlenty] = useState(emptyHand());
+  const [partner, setPartner] = useState(null);
+  const [bankGive, setBankGive] = useState(null);
+  const [bankWant, setBankWant] = useState(null);
+  useEffect(() => {
+    setPick(emptyHand()); setGive(emptyHand()); setWant(emptyHand());
+    setPlenty(emptyHand()); setPartner(null); setBankGive(null); setBankWant(null);
+  }, [modal.k]);
+  const close = () => setModal(null);
+  const cap = (n) => ({ brick: n, lumber: n, wool: n, grain: n, ore: n });
+
+  if (modal.k === "log") {
+    return (
+      <Sheet title="Recent moves" onClose={close}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+          {g.log.slice().reverse().map((l, i) => (
+            <div key={i} style={{ color: i === 0 ? C.parch : C.parchDim, fontSize: 14, lineHeight: 1.4 }}>{l.m}</div>
+          ))}
+        </div>
+        <div style={{ marginTop: 12, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
+          Only the last few moves travel in the link — the full history lives in your group chat.
+        </div>
+      </Sheet>
+    );
+  }
+
+  if (modal.k === "discard") {
+    const total = handTotal(pick);
+    return (
+      <Sheet title={`Discard ${owed}`} onClose={close}
+        footer={<Btn tone="warn" disabled={total !== owed} style={{ flex: 1 }}
+          onClick={() => { apply((d) => doDiscard(d, actor, pick)); close(); }}>
+          {total === owed ? `Discard ${owed}` : `${total} of ${owed} chosen`}</Btn>}>
+        <ResStepper value={pick} max={hand} onChange={(r, v) => setPick({ ...pick, [r]: Math.min(v, hand[r]) })} />
+      </Sheet>
+    );
+  }
+
+  if (modal.k === "bank") {
+    const rate = bankGive ? tradeRate(g, actor, bankGive) : null;
+    const row = (label, value, onSet, filter, showRate) => (
+      <div style={{ marginBottom: 14 }}>
+        <Eyebrow>{label}</Eyebrow>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {RES.map((r) => {
+            const dis = !filter(r);
+            return (
+              <button key={r} disabled={dis} onClick={() => onSet(r)} style={{
+                background: value === r ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+                border: `1px solid ${value === r ? C.gold : C.line}`, borderRadius: 5, padding: "8px 10px",
+                color: dis ? "rgba(239,230,210,.25)" : C.parch, fontFamily: dispFont, fontSize: 12,
+                letterSpacing: ".06em", cursor: dis ? "default" : "pointer" }}>
+                <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: 2, background: RES_COLOR[r], marginRight: 5 }} />
+                {RES_LABEL[r]}{showRate && <span style={{ color: C.parchDim }}> {tradeRate(g, actor, r)}:1</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+    return (
+      <Sheet title="Trade with the bank" onClose={close}
+        footer={<Btn tone="go" style={{ flex: 1 }} disabled={!bankGive || !bankWant || bankGive === bankWant}
+          onClick={() => { apply((d) => bankTrade(d, actor, bankGive, bankWant)); close(); }}>
+          {bankGive && bankWant ? `Give ${rate} ${RES_LABEL[bankGive].toLowerCase()}` : "Pick both sides"}</Btn>}>
+        {row("Give", bankGive, setBankGive, (r) => hand[r] >= tradeRate(g, actor, r), true)}
+        {row("Receive 1 of", bankWant, setBankWant, (r) => g.bank[r] > 0, false)}
+      </Sheet>
+    );
+  }
+
+  if (modal.k === "swap") {
+    const theirHand = partner == null ? emptyHand() : g.hands[partner];
+    const ok = partner != null && handTotal(give) > 0 && handTotal(want) > 0
+      && RES.every((r) => hand[r] >= give[r] && theirHand[r] >= want[r]);
+    return (
+      <Sheet title="Trade with a player" onClose={close}
+        footer={<Btn tone="go" style={{ flex: 1 }} disabled={!ok}
+          onClick={() => {
+            apply((d) => {
+              RES.forEach((r) => {
+                d.hands[actor][r] -= give[r]; d.hands[partner][r] += give[r];
+                d.hands[partner][r] -= want[r]; d.hands[actor][r] += want[r];
+              });
+              say(d, `${pname(d, actor)} traded with ${pname(d, partner)}.`);
+            });
+            close();
+          }}>{ok ? "Do the trade" : "Fill in both sides"}</Btn>}>
+        <Eyebrow>With</Eyebrow>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+          {g.players.map((p, i) => i === actor ? null : (
+            <button key={i} onClick={() => setPartner(i)} style={{
+              background: partner === i ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+              border: `1px solid ${partner === i ? C.gold : C.line}`, borderRadius: 5, padding: "8px 12px",
+              color: C.parch, fontFamily: dispFont, fontSize: 13, cursor: "pointer" }}>
+              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: PC[p.color].hex, marginRight: 6 }} />
+              {p.name}
+            </button>
+          ))}
+        </div>
+        <Eyebrow>You give</Eyebrow>
+        <ResStepper value={give} max={hand} onChange={(r, v) => setGive({ ...give, [r]: Math.min(v, hand[r]) })} />
+        <div style={{ height: 16 }} />
+        <Eyebrow>You get{partner != null ? ` from ${pname(g, partner)}` : ""}</Eyebrow>
+        <ResStepper value={want} max={partner == null ? cap(0) : theirHand}
+          onChange={(r, v) => setWant({ ...want, [r]: Math.min(v, theirHand[r]) })} />
+        {partner != null && <div style={{ marginTop: 10, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
+          You can see {pname(g, partner)}'s hand here — that's unavoidable when the whole game rides in the link. Don't be a snake about it.
+        </div>}
+      </Sheet>
+    );
+  }
+
+  if (modal.k === "plenty") {
+    const total = handTotal(plenty);
+    return (
+      <Sheet title="Year of plenty" onClose={close}
+        footer={<Btn tone="go" style={{ flex: 1 }} disabled={total !== 2}
+          onClick={() => {
+            const arr = []; RES.forEach((r) => { for (let i = 0; i < plenty[r]; i++) arr.push(r); });
+            apply((d) => playDev(d, actor, modal.idx, arr)); close();
+          }}>{total === 2 ? "Take them" : `Choose ${2 - total} more`}</Btn>}>
+        <ResStepper value={plenty} max={cap(2)} onChange={(r, v) => {
+          const next = { ...plenty, [r]: v }; if (handTotal(next) <= 2) setPlenty(next);
+        }} />
+      </Sheet>
+    );
+  }
+
+  if (modal.k === "monopoly") {
+    return (
+      <Sheet title="Monopoly" onClose={close}>
+        <div style={{ color: C.parchDim, fontSize: 14, marginBottom: 12 }}>Name a resource. Everyone hands you all of theirs.</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {RES.map((r) => (
+            <Btn key={r} onClick={() => { apply((d) => playDev(d, actor, modal.idx, r)); close(); }}>{RES_LABEL[r]}</Btn>
+          ))}
+        </div>
+      </Sheet>
+    );
+  }
+  return null;
+}

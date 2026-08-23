@@ -1,11 +1,21 @@
 {
   "name": "harbor",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "Untimed play-by-link settlers game",
-  "main": "server.js",
+  "type": "module",
+  "description": "Untimed play-by-link settlers game. The URL is the save file.",
   "scripts": {
-    "start": "node server.js"
+    "build": "node build.mjs",
+    "start": "node server.js",
+    "test": "node test/smoke.mjs"
+  },
+  "dependencies": {
+    "esbuild": "^0.25.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "jsdom": "^25.0.0"
   },
   "engines": {
     "node": ">=18"
