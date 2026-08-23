@@ -16,10 +16,13 @@ const code = readFileSync(new URL("../bundle.js", import.meta.url), "utf8");
 const BASE = "https://harbor.test/";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function boot(url) {
+function boot(url, seedStorage) {
   const dom = new JSDOM('<!doctype html><html><body><div id=root></div></body></html>',
     { url, runScripts: "outside-only", pretendToBeVisual: true });
   const w = dom.window;
+  // jsdom gives every instance a fresh localStorage; seeding it simulates
+  // re-opening a link on a device that has already seen a newer state.
+  if (seedStorage) Object.entries(seedStorage).forEach(([k, v]) => w.localStorage.setItem(k, v));
   Object.assign(w, {
     CompressionStream: globalThis.CompressionStream,
     DecompressionStream: globalThis.DecompressionStream,
@@ -88,7 +91,7 @@ check("six hand-offs during setup (Dot goes twice)", hops === 6);
 check("setup completes into the roll phase", H(w).includes("Roll the dice"));
 
 // play turns
-let sevens = 0, discards = 0, robbers = 0, passes = 0, longest = 0;
+let sevens = 0, discards = 0, robbers = 0, passes = 0, longest = 0, earlyLink = null;
 for (let t = 0; t < 30; t++) {
   if (btn(w, "Discard ")) {
     sevens++;
@@ -118,13 +121,49 @@ for (let t = 0; t < 30; t++) {
   click(w, "End turn"); await sleep(280);
   if (H(w).includes("SEND THIS TO") || H(w).includes("WINS")) {
     const l3 = shownLink(w);
-    if (l3) { longest = Math.max(longest, l3.split("#")[1].length); passes++; w = boot(l3); await wait(w, (x) => H(x).includes("<svg")); }
+    if (l3) { longest = Math.max(longest, l3.split("#")[1].length); passes++; if (!earlyLink) earlyLink = l3; w = boot(l3); await wait(w, (x) => H(x).includes("<svg")); }
   }
 }
 check("turns were handed off by link", passes > 15);
 check("sevens were resolved by the right players", sevens === 0 || discards === sevens);
 check("link payload stays URL-sized", longest > 0 && longest < 1500);
 check("game still coherent after many hand-offs", H(w).includes("<svg") && H(w).includes("playing as"));
+
+// stale-link guard: re-opening an old link on a device that has seen newer
+// state must warn and require an explicit override
+{
+  const storage = {};
+  for (let i = 0; i < w.localStorage.length; i++) { const k = w.localStorage.key(i); storage[k] = w.localStorage.getItem(k); }
+  const freshest = BASE + "#" + w.location.hash.replace(/^#/, "");
+
+  let d = boot(earlyLink, storage);
+  const warned = await wait(d, (x) => H(x).includes("This link is old"));
+  check("stale link warns instead of loading", warned && !H(d).includes("<svg"));
+  click(d, "Open the old link anyway");
+  check("stale link can still be opened deliberately", await wait(d, (x) => H(x).includes("<svg")));
+
+  d = boot(freshest, storage);
+  check("newest link opens without a warning", await wait(d, (x) => H(x).includes("<svg")) && !H(d).includes("This link is old"));
+
+  d = boot(earlyLink); // a device that never saw the newer state can't know it's stale
+  check("fresh device opens any link silently", await wait(d, (x) => H(x).includes("<svg")));
+}
+
+// the shipped server must actually boot — package.json's "type": "module"
+// once turned server.js's require() into a crash-loop on Railway
+{
+  const { spawn } = await import("child_process");
+  const srv = spawn(process.execPath, [new URL("../server.js", import.meta.url).pathname], { env: { ...process.env, PORT: "34873" } });
+  let ok = false, err = "";
+  srv.stderr.on("data", (c) => { err += c; });
+  for (let i = 0; i < 40 && !ok; i++) {
+    await sleep(100);
+    try { const r = await fetch("http://127.0.0.1:34873/health"); ok = (await r.text()) === "ok"; } catch { /* not up yet */ }
+  }
+  srv.kill();
+  check("server.js boots and serves /health", ok);
+  if (!ok && err) console.log(err.slice(0, 400));
+}
 
 console.log(`\nsetup hops ${hops} · turns passed ${passes} · sevens ${sevens} · robber moves ${robbers} · longest link ${longest} chars`);
 console.log(failures ? `\n${failures} FAILED` : "\nall checks passed");

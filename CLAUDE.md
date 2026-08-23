@@ -110,6 +110,10 @@ Remember to hard-refresh on mobile after a deploy; `Cache-Control` is 5 minutes.
 - **Hidden information isn't actually hidden.** Anyone who decodes the link can
   read every hand. Unavoidable in this design; the UI just doesn't show it.
   This is stated plainly on the home screen.
-- **Opening an old link forks the game.** Newest link wins; there's no guard
-  against someone scrolling up in the chat and tapping a stale one. A turn
-  counter check with a warning would be a real improvement.
+- ~~**Opening an old link forks the game.**~~ Fixed: every action bumps a
+  monotonic `seq` counter (packed as `q`), and each device remembers the
+  highest seq it has seen per game code in localStorage. Opening a link older
+  than that shows a warning screen with an explicit "Open the old link anyway"
+  override (which accepts the fork and resets the marker). A device that never
+  saw the newer state can't know a link is stale — the guard is best-effort by
+  design, and fails open where localStorage is unavailable.

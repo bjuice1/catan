@@ -314,6 +314,7 @@ function newGame(code, names) {
   return {
     v: 1,
     code,
+    seq: 0,
     createdAt: Date.now(),
     players: names.map((nm, i) => ({ name: nm, color: i })),
     board,
@@ -620,6 +621,7 @@ function pack(g) {
   Object.entries(g.pendingDiscard).forEach(([p, n]) => flatPD.push(+p, n));
   return {
     c: g.code,
+    q: g.seq || 0,
     n: g.players.map((p) => p.name),
     t: g.board.hexes.map((h) => T_LIST.indexOf(h.terrain)).join(""),
     m: g.board.hexes.map((h) => h.number || 0).join(","),
@@ -676,6 +678,7 @@ function unpack(o) {
 
   const g = {
     v: 1, code: o.c,
+    seq: o.q || 0,
     players: o.n.map((nm, i) => ({ name: nm, color: i })),
     board: { hexes, ports, robber: GEO.hexes[o.rb].id },
     buildings, roads,
@@ -727,6 +730,19 @@ async function encodeGame(g) {
   const buf = await new Response(cs.readable).arrayBuffer();
   return "z" + b64url(new Uint8Array(buf));
 }
+/* The newest-seq-seen-per-game marker lets us warn when someone opens a stale
+   link from earlier in the chat. localStorage can throw (private mode,
+   sandboxed frames) — treat storage as best-effort and fail open. */
+const seqKey = (code) => "harbor-seq-" + code;
+function knownSeq(code) {
+  try { return +(window.localStorage.getItem(seqKey(code)) || 0); } catch { return 0; }
+}
+function rememberSeq(code, seq, force) {
+  try {
+    if (force || seq > knownSeq(code)) window.localStorage.setItem(seqKey(code), String(seq));
+  } catch { /* storage unavailable — the guard just won't fire on this device */ }
+}
+
 async function decodeGame(str) {
   const tag = str[0], body = unb64url(str.slice(1));
   let json;
@@ -952,6 +968,7 @@ export default function App() {
   const [note, setNote] = useState("");
   const [names, setNames] = useState(["", "", "", ""]);
   const [booting, setBooting] = useState(true);
+  const [stale, setStale] = useState(null);
 
   /* load from the URL */
   useEffect(() => {
@@ -960,8 +977,14 @@ export default function App() {
       if (h) {
         try {
           const loaded = await decodeGame(h);
-          setG(loaded);
-          setLink(window.location.href);
+          const seen = knownSeq(loaded.code);
+          if (seen > (loaded.seq || 0)) {
+            setStale({ g: loaded, seen });
+          } else {
+            rememberSeq(loaded.code, loaded.seq || 0);
+            setG(loaded);
+            setLink(window.location.href);
+          }
         } catch {
           setNote("That link is damaged — the game state couldn't be read. Ask whoever sent it for the previous link.");
         }
@@ -971,6 +994,7 @@ export default function App() {
   }, []);
 
   const publish = async (next) => {
+    rememberSeq(next.code, next.seq || 0);
     const blob = await encodeGame(next);
     const base = window.location.href.split("#")[0];
     const url = base + "#" + blob;
@@ -989,6 +1013,7 @@ export default function App() {
     const d = clone(g);
     const out = fn(d);
     if (out === false) return;
+    d.seq = (d.seq || 0) + 1;
     if (d.phase !== "over" && scoreFor(d, d.turn, true) >= 10) {
       d.winner = d.turn; d.phase = "over";
       say(d, `${pname(d, d.turn)} reached 10 points and wins.`);
@@ -1019,6 +1044,35 @@ export default function App() {
   };
 
   if (booting) return <div style={{ background: C.ink, minHeight: "100vh" }} />;
+
+  /* ---- STALE LINK ---- */
+  if (stale && !g) {
+    const behind = stale.seen - (stale.g.seq || 0);
+    return (
+      <div style={{ minHeight: "100vh", background: C.ink, color: C.parch, fontFamily: bodyFont, padding: "28px 18px 60px" }}>
+        <style>{FONTS}</style>
+        <div style={{ maxWidth: 520, margin: "0 auto" }}>
+          <div style={{ fontFamily: dispFont, fontWeight: 300, fontSize: 44, letterSpacing: ".26em", lineHeight: 1 }}>HARBOR</div>
+          <div style={{ marginTop: 26, border: `1px solid #a4553d`, borderRadius: 8, padding: 16, background: C.panel }}>
+            <Eyebrow>This link is old</Eyebrow>
+            <div style={{ lineHeight: 1.6, fontSize: 15 }}>
+              This phone has already seen a newer version of this game — the link you tapped
+              is {behind} move{behind === 1 ? "" : "s"} behind. Opening it would fork the game
+              and throw away everything played since.
+              <br /><br />
+              Scroll to the <b>newest</b> link in the group chat and tap that instead.
+            </div>
+            <Btn onClick={() => {
+              rememberSeq(stale.g.code, stale.g.seq || 0, true);
+              setG(stale.g);
+              setLink(window.location.href);
+              setStale(null);
+            }} style={{ width: "100%", marginTop: 14 }}>Open the old link anyway</Btn>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   /* ---- HOME ---- */
   if (!g) {
