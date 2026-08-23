@@ -104,9 +104,10 @@ Remember to hard-refresh on mobile after a deploy; `Cache-Control` is 5 minutes.
 
 ## Known open items
 
-- **Zoom on real hardware is unverified.** The board is capped at `52vh` and
-  pinch is unblocked, but the original report ("way too zoom, then the zoom is
-  broken") was never confirmed fixed on an actual iPhone. Get a screenshot.
+- ~~**Zoom on real hardware is unverified.**~~ Confirmed fixed by an iPhone
+  screenshot (2026-08-23): board fits at `52vh` with the whole UI on one
+  screen. The screenshot instead exposed the status-bar overlap in standalone
+  mode, fixed with safe-area insets.
 - ~~**No notifications.**~~ Web push ships: the server pings the next player
   on turn changes and seven-discards (driven by client-sent `meta`, so the
   server stays blob-blind; deduped per turn number). On iPhone this only works
