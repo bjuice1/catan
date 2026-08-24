@@ -121,7 +121,12 @@ Remember to hard-refresh on mobile after a deploy; `Cache-Control` is 5 minutes.
 - ~~**Opening an old link forks the game.**~~ Gone by design: the server is
   authoritative and rejects any push whose `seq` isn't strictly newer, so a
   stale link just loads and then syncs forward on the next poll.
-- **Games live in server memory only.** A Railway redeploy or restart wipes
-  the store; any phone with the game open reseeds it automatically on its next
-  poll or push. If *every* phone has closed the tab when the server restarts,
-  the game is gone. A disk or KV persistence layer would fix this.
+- ~~**Games live in server memory only.**~~ Three layers now: games, push
+  subscriptions, and VAPID keys write through to `$HARBOR_DATA/harbor.json`
+  (auto-detects a Railway volume mounted at `/data`); every phone also keeps
+  a local backup per game and silently re-seeds a server that comes up empty.
+  **Attach a Railway volume at `/data`** to make it airtight — without one the
+  data file dies with each redeploy and only phone backups cover the gap.
+- **Player trading is still record-only.** The offer/accept flow the original
+  design couldn't afford (two extra link hand-offs) is now cheap with server
+  sync + push. Best next feature.

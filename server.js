@@ -23,23 +23,47 @@ const statics = {
 };
 const port = process.env.PORT || 3000;
 
-/* Stable VAPID keys survive restarts when set as env vars (recommended on
-   Railway); otherwise fresh ones are generated and clients quietly
-   re-subscribe when they notice the key changed. */
+/* ---- persistence ----
+   Games, push subscriptions, and the VAPID keys write through to one JSON
+   file. Point HARBOR_DATA at a Railway volume mount and nothing survives-only
+   -in-memory anymore; /data is picked up automatically when mounted there.
+   With no volume the file still rides out crashes within a deployment, and
+   phones' local backups cover the rest. */
+const DATA_DIR = process.env.HARBOR_DATA || (fs.existsSync("/data") ? "/data" : path.join(__dirname, "data"));
+fs.mkdirSync(DATA_DIR, { recursive: true });
+const STORE = path.join(DATA_DIR, "harbor.json");
+let saved = {};
+try { saved = JSON.parse(fs.readFileSync(STORE, "utf8")); } catch { /* first boot */ }
+
+let saveTimer = null;
+function persist() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    const out = {
+      vapid,
+      games: Object.fromEntries(games),
+      subs: Object.fromEntries([...subs].map(([c, m]) => [c, Object.fromEntries(m)])),
+    };
+    try { fs.writeFileSync(STORE, JSON.stringify(out)); } catch (e) { console.log("persist failed: " + e.message); }
+  }, 400);
+}
+
+/* VAPID keys: env beats the store, the store beats generating fresh ones */
 let vapid;
 if (process.env.VAPID_PUBLIC && process.env.VAPID_PRIVATE) {
   vapid = { publicKey: process.env.VAPID_PUBLIC, privateKey: process.env.VAPID_PRIVATE };
+} else if (saved.vapid) {
+  vapid = saved.vapid;
 } else {
   vapid = webpush.generateVAPIDKeys();
-  console.log("VAPID keys generated for this run. Pin them with env vars:");
-  console.log("  VAPID_PUBLIC=" + vapid.publicKey);
-  console.log("  VAPID_PRIVATE=" + vapid.privateKey);
 }
 webpush.setVapidDetails("mailto:harbor@example.com", vapid.publicKey, vapid.privateKey);
 
-const games = new Map();  // code -> { v, blob, t }
-const subs = new Map();   // code -> Map(seat -> subscription)
+const games = new Map(Object.entries(saved.games || {}));  // code -> { v, blob, t }
+const subs = new Map(Object.entries(saved.subs || {}).map(([c, m]) => [c, new Map(Object.entries(m).map(([s, x]) => [+s, x]))]));
 const pinged = new Map(); // code -> Set of "seat:turnNo" already notified
+persist();
+if (games.size) console.log(`restored ${games.size} game(s) from ${STORE}`);
 const MAX_GAMES = 2000;
 const MAX_BLOB = 20000;
 
@@ -64,7 +88,7 @@ function notify(code, seat, payload, tag) {
   if (seen.size > 400) pinged.set(code, new Set([...seen].slice(-200)));
   webpush.sendNotification(sub, JSON.stringify(payload)).catch((err) => {
     // 404/410 mean the subscription is dead — forget it
-    if (err.statusCode === 404 || err.statusCode === 410) gameSubs.delete(seat);
+    if (err.statusCode === 404 || err.statusCode === 410) { gameSubs.delete(seat); persist(); }
   });
 }
 
@@ -92,6 +116,7 @@ http.createServer((req, res) => {
           pinged.delete(oldest[0]);
         }
         games.set(code, { v, blob, t: Date.now() });
+        persist();
         // the client tells us who is up; the server just delivers the nudge
         if (meta && typeof meta === "object") {
           const { turn, tn, by, discard, winner } = meta;
@@ -133,6 +158,7 @@ http.createServer((req, res) => {
       let gameSubs = subs.get(s[1]);
       if (!gameSubs) { gameSubs = new Map(); subs.set(s[1], gameSubs); }
       gameSubs.set(seat, sub);
+      persist();
       return json(res, 200, { ok: true });
     });
     return;

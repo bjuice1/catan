@@ -683,7 +683,7 @@ function pack(g) {
     fr: g.freeRoads,
     dp: g.devPlayed ? 1 : 0,
     w: g.winner == null ? -1 : g.winner,
-    lg: g.log.slice(-5).map((l) => l.m),
+    lg: g.log.slice(-30).map((l) => l.m),
   };
 }
 
@@ -1314,10 +1314,14 @@ export default function App() {
     const me = (myName.trim() || "Player 1").slice(0, 14);
     const seats = [me];
     for (let i = 2; i <= myCount; i++) seats.push(`Player ${i}`);
-    const game = newGame(makeCode4(), seats);
-    game.players[0].claimed = true;
-    game.seq = 1;
-    const r = await serverPut(game, 0);
+    let game = null, r = null;
+    for (let tries = 0; tries < 5; tries++) {
+      game = newGame(makeCode4(), seats);
+      game.players[0].claimed = true;
+      game.seq = 1;
+      r = await serverPut(game, 0);
+      if (r.ok || !r.conflict) break; // a conflict means the code is taken — reroll it
+    }
     if (!r.ok) { setNote("Couldn't reach the server to create the game — try again in a moment."); return; }
     rememberSeat(game.code, 0);
     rememberGame(game.code);
@@ -1477,7 +1481,9 @@ export default function App() {
   const owed = g.pendingDiscard[actor] || 0;
   const myTurn = g.turn === actor && g.winner == null;
   const canBuy = (k) => canAfford(hand, COST[k]);
-  const devPlayable = (c) => myTurn && (g.phase === "main" || g.phase === "roll") && !g.devPlayed && c.turn < g.turnNo && !c.used && c.type !== "vp";
+  /* before rolling, only a knight may be played; one dev card per turn */
+  const devPlayable = (c) => myTurn && (g.phase === "main" || (g.phase === "roll" && c.type === "knight"))
+    && !g.devPlayed && c.turn < g.turnNo && !c.used && c.type !== "vp";
   const startBuild = (kind) => {
     if (kind === "road") setSel({ kind: "road", options: new Set(legalRoads(g, actor, null)) });
     if (kind === "town") setSel({ kind: "town", options: new Set(legalSettlements(g, actor, false)) });
@@ -1691,7 +1697,7 @@ export default function App() {
 
         {myTurn && g.phase === "roll" && g.devHands[actor].some(devPlayable) && (
           <div style={{ marginTop: 12 }}>
-            <Eyebrow>You may play a card before rolling</Eyebrow>
+            <Eyebrow>You may play a knight before rolling</Eyebrow>
             <DevList g={g} actor={actor} devPlayable={devPlayable} apply={apply} setModal={setModal} />
           </div>
         )}
@@ -1767,7 +1773,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
           ))}
         </div>
         <div style={{ marginTop: 12, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
-          Only the last few moves travel in the link — the full history lives in your group chat.
+          The last thirty moves. Anything older is lost to the sea.
         </div>
       </Sheet>
     );

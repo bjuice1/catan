@@ -8,8 +8,10 @@
  *   npm run build && npm test
  */
 import { JSDOM } from "jsdom";
-import { readFileSync } from "fs";
+import { readFileSync, mkdtempSync } from "fs";
 import { spawn } from "child_process";
+import { tmpdir } from "os";
+import { join } from "path";
 
 const code_js = readFileSync(new URL("../bundle.js", import.meta.url), "utf8");
 const PORT = 34871;
@@ -21,7 +23,9 @@ const check = (label, ok) => { console.log(`${ok ? "  ok  " : "  FAIL"}  ${label
 
 // the server under test is the real one — package.json's "type": "module"
 // once turned server.js's require() into a crash-loop on Railway
-const spawnServer = () => spawn(process.execPath, [new URL("../server.js", import.meta.url).pathname], { env: { ...process.env, PORT: String(PORT) } });
+const dataA = mkdtempSync(join(tmpdir(), "harbor-a-"));
+const dataB = mkdtempSync(join(tmpdir(), "harbor-b-"));
+const spawnServer = (dataDir = dataA) => spawn(process.execPath, [new URL("../server.js", import.meta.url).pathname], { env: { ...process.env, PORT: String(PORT), HARBOR_DATA: dataDir } });
 const waitHealthy = async () => {
   for (let i = 0; i < 50; i++) {
     await sleep(100);
@@ -321,12 +325,24 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   check("the header takes you back to the lobby", !!back && await wait(L, (x) => H(x).includes("Your games")));
 }
 
-// ---- a server restart loses the store; any phone's backup revives it ----
+// ---- the volume store alone revives games across restarts ----
+{
+  await sleep(600); // let the debounced persist flush
+  srv.kill();
+  await sleep(400);
+  srv = spawnServer(dataA); // same data dir = same volume
+  check("games survive a restart via the data file, no phone needed",
+    await waitHealthy() && (await fetch(BASE + "api/g/" + code)).ok);
+}
+
+// ---- and with a wiped volume, any phone's backup still revives it ----
 {
   srv.kill();
   await sleep(400);
-  srv = spawnServer();
-  check("a fresh server comes up empty-handed", await waitHealthy() && (await fetch(BASE + "api/g/" + code)).status === 404);
+  srv = spawnServer(dataB); // pristine data dir = lost volume
+  // (no 404 assertion here: the still-open phones re-seed the game within
+  // one poll tick of the empty server coming up, which is the point)
+  check("a wiped server comes back healthy", await waitHealthy());
   const storage = {};
   for (let i = 0; i < A.localStorage.length; i++) { const k = A.localStorage.key(i); storage[k] = A.localStorage.getItem(k); }
   const R = boot(joinLink, storage);
