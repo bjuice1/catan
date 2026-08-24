@@ -119,7 +119,10 @@ http.createServer((req, res) => {
         persist();
         // the client tells us who is up; the server just delivers the nudge
         if (meta && typeof meta === "object") {
-          const { turn, tn, by, discard, winner } = meta;
+          const { turn, tn, by, discard, winner, tradeTo } = meta;
+          if (Number.isInteger(tradeTo) && tradeTo !== by && winner == null) {
+            notify(code, tradeTo, { title: "Harbor · " + code, body: "You have a trade offer.", code }, `trade:${tradeTo}:${v}`);
+          }
           const title = "Harbor · " + code;
           if (winner != null) {
             const gameSubs = subs.get(code) || new Map();

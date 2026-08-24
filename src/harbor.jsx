@@ -193,6 +193,11 @@ const vertexNeighborVerts = (v) =>
 function canPlaceSettlement(g, v, p, setup) {
   if (g.buildings[v]) return false;
   if (vertexNeighborVerts(v).some((n) => g.buildings[n])) return false;
+  /* house rule: no towns mid-run of a single colour's road — a corner where
+     two or more roads meet is only buildable when different colours contest
+     it. (Player 0 is falsy: compare against undefined, never truthiness.) */
+  const roadOwners = (GEO.vertexEdges[v] || []).filter((e) => g.roads[e] !== undefined).map((e) => g.roads[e]);
+  if (roadOwners.length >= 2 && new Set(roadOwners).size === 1) return false;
   if (setup) return true;
   return (GEO.vertexEdges[v] || []).some((e) => g.roads[e] === p);
 }
@@ -580,6 +585,38 @@ function playDev(g, p, idx, payload) {
 }
 
 /* ---------- trading ---------- */
+const fmtHand = (h) => RES.filter((r) => h[r] > 0).map((r) => `${h[r]} ${RES_LABEL[r].toLowerCase()}`).join(" + ") || "nothing";
+
+function offerTrade(g, from, to, give, want) {
+  if (!RES.every((r) => g.hands[from][r] >= (give[r] || 0))) return false;
+  g.trade = { from, to, give, want };
+  say(g, `${pname(g, from)} offered ${pname(g, to)} a trade: ${fmtHand(give)} for ${fmtHand(want)}.`);
+  return g;
+}
+function acceptTrade(g) {
+  const t = g.trade;
+  if (!t) return false;
+  const ok = RES.every((r) => g.hands[t.from][r] >= (t.give[r] || 0) && g.hands[t.to][r] >= (t.want[r] || 0));
+  g.trade = null;
+  if (!ok) {
+    say(g, `The trade fell through — someone no longer had the cards.`);
+    return g;
+  }
+  RES.forEach((r) => {
+    g.hands[t.from][r] += (t.want[r] || 0) - (t.give[r] || 0);
+    g.hands[t.to][r] += (t.give[r] || 0) - (t.want[r] || 0);
+  });
+  say(g, `${pname(g, t.to)} accepted ${pname(g, t.from)}'s trade.`);
+  return g;
+}
+function declineTrade(g, byOfferer) {
+  const t = g.trade;
+  if (!t) return false;
+  g.trade = null;
+  say(g, byOfferer ? `${pname(g, t.from)} withdrew the trade offer.` : `${pname(g, t.to)} declined the trade.`);
+  return g;
+}
+
 function bankTrade(g, p, give, want) {
   const rate = tradeRate(g, p, give);
   g.hands[p][give] -= rate;
@@ -587,17 +624,6 @@ function bankTrade(g, p, give, want) {
   g.hands[p][want] += 1;
   g.bank[want] -= 1;
   say(g, `${pname(g, p)} traded ${rate} ${RES_LABEL[give].toLowerCase()} for 1 ${RES_LABEL[want].toLowerCase()}.`);
-  return g;
-}
-function settleTrade(g, withPlayer) {
-  const t = g.trade;
-  const a = t.from, b = withPlayer;
-  RES.forEach((r) => {
-    g.hands[a][r] -= t.give[r] || 0; g.hands[b][r] += t.give[r] || 0;
-    g.hands[b][r] -= t.want[r] || 0; g.hands[a][r] += t.want[r] || 0;
-  });
-  say(g, `${pname(g, a)} and ${pname(g, b)} traded.`);
-  g.trade = null;
   return g;
 }
 
@@ -673,6 +699,7 @@ function pack(g) {
     so: g.setupOrder.slice(0, g.players.length).join(""),
     rl: g.rolls.join(","),
     sa: g.sevenAt || 0,
+    tr: g.trade ? [g.trade.from, g.trade.to, ...RES.map((r) => g.trade.give[r] || 0), ...RES.map((r) => g.trade.want[r] || 0)] : 0,
     ph: PH_LIST.indexOf(g.phase),
     si: g.setupIdx,
     lv: g.lastSetupVertex == null ? -1 : vI[g.lastSetupVertex],
@@ -739,7 +766,11 @@ function unpack(o) {
     robberReturn: PH_LIST[o.rr],
     freeRoads: o.fr,
     devPlayed: !!o.dp,
-    trade: null,
+    trade: o.tr ? {
+      from: o.tr[0], to: o.tr[1],
+      give: Object.fromEntries(RES.map((r, i) => [r, o.tr[2 + i]])),
+      want: Object.fromEntries(RES.map((r, i) => [r, o.tr[7 + i]])),
+    } : null,
     winner: o.w < 0 ? null : o.w,
     log: o.lg.map((m) => ({ t: 0, m })),
   };
@@ -816,6 +847,7 @@ async function serverPut(g, by) {
     turn: g.turn, tn: g.turnNo,
     discard: Object.keys(g.pendingDiscard || {}).map(Number),
     winner: g.winner == null ? null : g.winner,
+    tradeTo: g.trade ? g.trade.to : null,
   };
   try {
     const r = await fetch(apiUrl(g.code), {
@@ -1612,6 +1644,23 @@ export default function App() {
           </div>
         )}
 
+        {/* a trade offer aimed at you — answer from any phase, any turn */}
+        {g.trade && g.trade.to === actor && g.winner == null && (
+          <div style={{ border: `1px solid ${C.gold}`, borderRadius: 7, padding: 14, marginBottom: 12, background: "rgba(224,164,55,.08)" }}>
+            <Eyebrow>{pname(g, g.trade.from)} offers you a trade</Eyebrow>
+            <div style={{ fontSize: 15, lineHeight: 1.6, marginBottom: 10 }}>
+              You get <b>{fmtHand(g.trade.give)}</b> — you give <b>{fmtHand(g.trade.want)}</b>.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <Btn tone="go" style={{ flex: 1 }} disabled={!RES.every((r) => hand[r] >= (g.trade.want[r] || 0))}
+                onClick={() => apply((d) => acceptTrade(d))}>
+                {RES.every((r) => hand[r] >= (g.trade.want[r] || 0)) ? "Accept" : "Can't afford it"}
+              </Btn>
+              <Btn tone="warn" style={{ flex: 1 }} onClick={() => apply((d) => declineTrade(d, false))}>Decline</Btn>
+            </div>
+          </div>
+        )}
+
         {owed > 0 && (
           <Btn tone="warn" style={{ width: "100%", marginBottom: 10 }}
             onClick={() => setModal({ k: "discard" })}>Discard {owed} cards</Btn>
@@ -1678,9 +1727,18 @@ export default function App() {
             {tab === "trade" && (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 <Btn onClick={() => setModal({ k: "bank" })} disabled={handTotal(hand) < 2}>Trade with the bank</Btn>
-                <Btn onClick={() => setModal({ k: "swap", with: null })}>Record a trade with a player</Btn>
+                {g.trade && g.trade.from === actor ? (
+                  <div style={{ border: `1px solid ${C.gold}`, borderRadius: 6, padding: 12 }}>
+                    <div style={{ fontSize: 14, lineHeight: 1.5, marginBottom: 8 }}>
+                      Waiting on {pname(g, g.trade.to)}: your {fmtHand(g.trade.give)} for their {fmtHand(g.trade.want)}.
+                    </div>
+                    <Btn tone="warn" onClick={() => apply((d) => declineTrade(d, true))}>Withdraw the offer</Btn>
+                  </div>
+                ) : (
+                  <Btn onClick={() => setModal({ k: "offer" })} disabled={handTotal(hand) < 1}>Offer a trade</Btn>
+                )}
                 <div style={{ color: C.parchDim, fontSize: 13, lineHeight: 1.55 }}>
-                  Haggle in the group chat, then record what you agreed. It checks both hands before it goes through.
+                  They get the offer on their phone and accept or decline there. One open offer at a time.
                 </div>
                 <div style={{ color: C.parchDim, fontSize: 13 }}>
                   Your rates: {RES.map((r) => `${RES_LABEL[r]} ${tradeRate(g, actor, r)}:1`).join(" · ")}
@@ -1904,24 +1962,15 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
     );
   }
 
-  if (modal.k === "swap") {
-    const theirHand = partner == null ? emptyHand() : g.hands[partner];
+  if (modal.k === "offer") {
     const ok = partner != null && handTotal(give) > 0 && handTotal(want) > 0
-      && RES.every((r) => hand[r] >= give[r] && theirHand[r] >= want[r]);
+      && RES.every((r) => hand[r] >= give[r]);
     return (
-      <Sheet title="Trade with a player" onClose={close}
+      <Sheet title="Offer a trade" onClose={close}
         footer={<Btn tone="go" style={{ flex: 1 }} disabled={!ok}
-          onClick={() => {
-            apply((d) => {
-              RES.forEach((r) => {
-                d.hands[actor][r] -= give[r]; d.hands[partner][r] += give[r];
-                d.hands[partner][r] -= want[r]; d.hands[actor][r] += want[r];
-              });
-              say(d, `${pname(d, actor)} traded with ${pname(d, partner)}.`);
-            });
-            close();
-          }}>{ok ? "Do the trade" : "Fill in both sides"}</Btn>}>
-        <Eyebrow>With</Eyebrow>
+          onClick={() => { apply((d) => offerTrade(d, actor, partner, give, want)); close(); }}>
+          {ok ? `Send the offer to ${pname(g, partner)}` : "Fill in both sides"}</Btn>}>
+        <Eyebrow>To</Eyebrow>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
           {g.players.map((p, i) => i === actor ? null : (
             <button key={i} onClick={() => setPartner(i)} style={{
@@ -1936,12 +1985,11 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         <Eyebrow>You give</Eyebrow>
         <ResStepper value={give} max={hand} onChange={(r, v) => setGive({ ...give, [r]: Math.min(v, hand[r]) })} />
         <div style={{ height: 16 }} />
-        <Eyebrow>You get{partner != null ? ` from ${pname(g, partner)}` : ""}</Eyebrow>
-        <ResStepper value={want} max={partner == null ? cap(0) : theirHand}
-          onChange={(r, v) => setWant({ ...want, [r]: Math.min(v, theirHand[r]) })} />
-        {partner != null && <div style={{ marginTop: 10, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
-          You can see {pname(g, partner)}'s hand here so the trade can be checked. Don't be a snake about it.
-        </div>}
+        <Eyebrow>You want in return</Eyebrow>
+        <ResStepper value={want} max={cap(19)} onChange={(r, v) => setWant({ ...want, [r]: v })} />
+        <div style={{ marginTop: 10, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
+          Their cards stay hidden — if they can't cover it, they'll see "can't afford" on their end.
+        </div>
       </Sheet>
     );
   }

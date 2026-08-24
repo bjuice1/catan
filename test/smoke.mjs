@@ -204,6 +204,64 @@ check("a table-mate can discard for an away player", sevens === 0 || deputyWorke
 check("no phone was ever asked to send a link", !sawHandoffScreen);
 check("every phone still shows a coherent board", phones.every((w) => H(w).includes("<svg") && H(w).includes("HARBOR · " + code)));
 
+// ---- trade offers travel to the target's phone ----
+{
+  const seatOf = { Ann: 0, Ben: 1, Cal: 2, Dot: 3 };
+  let offered = false, declined = false;
+  for (let round = 0; round < 12 && !offered; round++) {
+    await sleep(180);
+    for (const w of phones) { // clear any pending sevens first
+      if (owesBtn(w)) {
+        tap(w, owesBtn(w)); await sleep(150);
+        for (let i = 0; i < 16; i++) {
+          const go = [...w.document.querySelectorAll("button")].find((b) => /^Discard \d+$/i.test(b.textContent.trim()) && !b.disabled);
+          if (go) { tap(w, go); break; }
+          const plus = [...w.document.querySelectorAll("button")].filter((b) => b.textContent === "+" && !b.disabled);
+          if (!plus.length) break;
+          tap(w, plus[0]); await sleep(60);
+        }
+        await sleep(250);
+      }
+    }
+    const roller = phones.find((w) => btn(w, "Roll the dice"));
+    if (roller) { click(roller, "Roll the dice"); await sleep(280); }
+    const robberW = phones.find((w) => H(w).includes("move the robber"));
+    if (robberW) {
+      const hx = [...robberW.document.querySelectorAll("polygon")].filter((p) => p.getAttribute("stroke") === "#e0a437");
+      if (hx.length) { tap(robberW, hx[0]); await sleep(280); }
+    }
+    const stealer = phones.find((w) => H(w).includes("Rob one of them"));
+    if (stealer) {
+      const v = [...stealer.document.querySelectorAll("button")].find((x) => /\(\d+\)/.test(x.textContent));
+      if (v) { tap(stealer, v); await sleep(240); }
+    }
+    const me = phones.find((w) => btn(w, "End turn"));
+    if (!me) continue;
+    click(me, "trade"); await sleep(120);
+    const offerBtn = btn(me, "Offer a trade");
+    if (!offerBtn || offerBtn.disabled) { click(me, "End turn"); await sleep(200); continue; }
+    tap(me, offerBtn); await sleep(150);
+    const toBtns = [...me.document.querySelectorAll("button")].filter((b) => Object.keys(seatOf).includes(b.textContent.trim()));
+    if (!toBtns.length) { click(me, "×"); click(me, "End turn"); await sleep(200); continue; }
+    const targetName = toBtns[0].textContent.trim();
+    tap(me, toBtns[0]); await sleep(100);
+    const pluses = [...me.document.querySelectorAll("button")].filter((b) => b.textContent === "+");
+    const givePlus = pluses.slice(0, 5).find((b) => !b.disabled);
+    if (!givePlus) { click(me, "×"); click(me, "End turn"); await sleep(200); continue; }
+    tap(me, givePlus); await sleep(80);
+    tap(me, pluses[5]); await sleep(80); // want: first resource, always steppable
+    click(me, "Send the offer"); await sleep(200);
+    offered = true;
+    const target = phones[seatOf[targetName]];
+    const arrived = await wait(target, (x) => H(x).includes("offers you a trade"), 4000);
+    check("a trade offer reaches the target's phone", arrived);
+    click(target, "Decline");
+    declined = await wait(me, (x) => !H(x).includes("Waiting on"), 4000);
+    check("declining clears the offer for the offerer", declined);
+  }
+  if (!offered) check("a trade offer could be sent", false);
+}
+
 // ---- roll history travels through the codec and shows hot/cold ----
 check("recent rolls strip shows on a synced phone", H(phones[1]).includes("LAST ROLLS"));
 {
