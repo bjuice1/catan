@@ -21,15 +21,19 @@ const check = (label, ok) => { console.log(`${ok ? "  ok  " : "  FAIL"}  ${label
 
 // the server under test is the real one — package.json's "type": "module"
 // once turned server.js's require() into a crash-loop on Railway
-const srv = spawn(process.execPath, [new URL("../server.js", import.meta.url).pathname], { env: { ...process.env, PORT: String(PORT) } });
+const spawnServer = () => spawn(process.execPath, [new URL("../server.js", import.meta.url).pathname], { env: { ...process.env, PORT: String(PORT) } });
+const waitHealthy = async () => {
+  for (let i = 0; i < 50; i++) {
+    await sleep(100);
+    try { if ((await (await fetch(BASE + "health")).text()) === "ok") return true; } catch { /* not yet */ }
+  }
+  return false;
+};
+let srv = spawnServer();
 let srvErr = "";
 srv.stderr.on("data", (c) => { srvErr += c; });
 {
-  let up = false;
-  for (let i = 0; i < 50 && !up; i++) {
-    await sleep(100);
-    try { up = (await (await fetch(BASE + "health")).text()) === "ok"; } catch { /* not yet */ }
-  }
+  const up = await waitHealthy();
   check("server.js boots and serves /health", up);
   if (!up) { console.log(srvErr.slice(0, 500)); process.exit(1); }
 }
@@ -47,6 +51,7 @@ function boot(url, seedStorage) {
   });
   w.fetch = (u, o) => globalThis.fetch(u, o);
   w.HARBOR_POLL_MS = 120;
+  w.HARBOR_DEPUTY_MS = 250;
   w.btoa = (s) => Buffer.from(s, "binary").toString("base64");
   w.atob = (s) => Buffer.from(s, "base64").toString("binary");
   w.navigator.clipboard = { writeText: async () => {} };
@@ -138,14 +143,33 @@ check("setup completes into the roll phase",
 
 // ---- turns: each phone acts on its own, server carries the moves ----
 let passes = 0, sevens = 0, discards = 0, robbers = 0;
+let deputyTried = false, deputyWorked = false;
+// the own-discard button is exactly "Discard N cards" — the deputy button
+// also contains the word "discard", so match precisely
+const owesBtn = (w) => [...w.document.querySelectorAll("button")]
+  .find((b) => /^Discard \d+ cards$/.test(b.textContent.trim()));
 for (let t = 0; t < 35; t++) {
   await sleep(180);
   noHandoffs();
   // anyone who owes cards from a seven discards from their own phone
   for (const w of phones) {
-    if (!btn(w, "Discard ")) continue;
+    if (!owesBtn(w)) continue;
+    if (!deputyTried) {
+      // play the away-player: don't discard, wait for a table-mate's deputy button
+      deputyTried = true;
+      let helper = null;
+      for (let i = 0; i < 40 && !helper; i++) {
+        await sleep(100);
+        helper = phones.find((x) => x !== w && btn(x, "holding things up"));
+      }
+      if (helper) {
+        click(helper, "holding things up");
+        deputyWorked = await wait(w, (x) => !owesBtn(x), 4000);
+      }
+      if (deputyWorked) { sevens++; discards++; continue; }
+    }
     sevens++;
-    click(w, "Discard "); await sleep(150);
+    tap(w, owesBtn(w)); await sleep(150);
     for (let i = 0; i < 16; i++) {
       const go = [...w.document.querySelectorAll("button")].find((b) => /^Discard \d+$/i.test(b.textContent.trim()) && !b.disabled);
       if (go) { tap(w, go); discards++; break; }
@@ -172,6 +196,7 @@ for (let t = 0; t < 35; t++) {
 }
 check("turns advance across phones", passes > 15);
 check("sevens were resolved from each phone", sevens === 0 || discards >= sevens);
+check("a table-mate can discard for an away player", sevens === 0 || deputyWorked);
 check("no phone was ever asked to send a link", !sawHandoffScreen);
 check("every phone still shows a coherent board", phones.every((w) => H(w).includes("<svg") && H(w).includes("HARBOR · " + code)));
 
@@ -294,6 +319,20 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   const back = L.document.querySelector('[title="All your games"]');
   if (back) { tap(L, back); }
   check("the header takes you back to the lobby", !!back && await wait(L, (x) => H(x).includes("Your games")));
+}
+
+// ---- a server restart loses the store; any phone's backup revives it ----
+{
+  srv.kill();
+  await sleep(400);
+  srv = spawnServer();
+  check("a fresh server comes up empty-handed", await waitHealthy() && (await fetch(BASE + "api/g/" + code)).status === 404);
+  const storage = {};
+  for (let i = 0; i < A.localStorage.length; i++) { const k = A.localStorage.key(i); storage[k] = A.localStorage.getItem(k); }
+  const R = boot(joinLink, storage);
+  const revived = await wait(R, (x) => H(x).includes("<svg"), 6000);
+  const back = await fetch(BASE + "api/g/" + code);
+  check("a phone's backup revives the lost game", revived && back.ok);
 }
 
 // ---- a two-player game works end to end through setup ----

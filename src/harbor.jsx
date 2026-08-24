@@ -334,6 +334,7 @@ function newGame(code, names) {
     turn: order[0],
     turnNo: 0,
     rolls: [],
+    sevenAt: 0,
     phase: "setupTown",
     setupOrder: order,
     setupIdx: 0,
@@ -438,6 +439,7 @@ function rollDice(g) {
     g.robberReturn = "main";
     if (Object.keys(pend).length) {
       g.phase = "discard";
+      g.sevenAt = Date.now();
       say(g, `Seven — ${Object.keys(pend).map((i) => pname(g, +i)).join(", ")} must discard.`);
     } else {
       g.phase = "robber";
@@ -450,15 +452,30 @@ function rollDice(g) {
   return g;
 }
 
-function doDiscard(g, p, sel) {
+function doDiscard(g, p, sel, deputy) {
   RES.forEach((r) => { g.hands[p][r] -= sel[r] || 0; g.bank[r] += sel[r] || 0; });
   delete g.pendingDiscard[p];
-  say(g, `${pname(g, p)} discarded ${handTotal(sel)}.`);
+  say(g, deputy == null
+    ? `${pname(g, p)} discarded ${handTotal(sel)}.`
+    : `${pname(g, deputy)} discarded ${handTotal(sel)} random cards for ${pname(g, p)} (they were away).`);
   if (!Object.keys(g.pendingDiscard).length) {
     g.phase = "robber";
     say(g, `${pname(g, g.turn)} moves the robber.`);
   }
   return g;
+}
+
+/* a table-mate throws random cards for a player who has wandered off */
+function deputyDiscard(g, p, by) {
+  const owed = g.pendingDiscard[p];
+  if (!owed) return false;
+  const pool = [];
+  RES.forEach((r) => { for (let i = 0; i < g.hands[p][r]; i++) pool.push(r); });
+  const sel = emptyHand();
+  for (let i = 0; i < owed && pool.length; i++) {
+    sel[pool.splice(Math.floor(Math.random() * pool.length), 1)[0]] += 1;
+  }
+  return doDiscard(g, p, sel, by);
 }
 
 function moveRobber(g, hid, p) {
@@ -655,6 +672,7 @@ function pack(g) {
     tu: g.turn, tn: g.turnNo,
     so: g.setupOrder.slice(0, g.players.length).join(""),
     rl: g.rolls.join(","),
+    sa: g.sevenAt || 0,
     ph: PH_LIST.indexOf(g.phase),
     si: g.setupIdx,
     lv: g.lastSetupVertex == null ? -1 : vI[g.lastSetupVertex],
@@ -711,6 +729,7 @@ function unpack(o) {
     largestArmy: o.la < 0 ? null : o.la,
     turn: o.tu, turnNo: o.tn,
     rolls: o.rl ? o.rl.split(",").map(Number) : [],
+    sevenAt: o.sa || 0,
     phase: PH_LIST[o.ph],
     setupOrder: order, setupIdx: o.si,
     lastSetupVertex: o.lv < 0 ? null : VIDX[o.lv],
@@ -753,12 +772,41 @@ async function encodeGame(g) {
    The server is a dumb versioned store: GET returns {v, blob}, PUT accepts
    only a strictly newer v (else 409 with the current state). v is g.seq. */
 const apiUrl = (code) => new URL("/api/g/" + code, window.location.href).toString();
+/* Every phone keeps the newest blob it has seen per game, so any player can
+   silently restore a game the server lost in a restart or redeploy. */
+const blobKey = (code) => "harbor-blob-" + code;
+function cacheBlob(code, v, blob) {
+  try {
+    const cur = JSON.parse(window.localStorage.getItem(blobKey(code)) || "null");
+    if (!cur || v > cur.v) window.localStorage.setItem(blobKey(code), JSON.stringify({ v, blob }));
+  } catch { /* best effort */ }
+}
+function cachedBlob(code) {
+  try { return JSON.parse(window.localStorage.getItem(blobKey(code)) || "null"); } catch { return null; }
+}
+
 async function serverGet(code) {
   try {
     const r = await fetch(apiUrl(code));
     if (!r.ok) return null;
-    return await r.json();
+    const j = await r.json();
+    cacheBlob(code, j.v, j.blob);
+    return j;
   } catch { return null; }
+}
+
+/* push this phone's backup of a lost game back onto the server */
+async function restoreGame(code) {
+  const c = cachedBlob(code);
+  if (!c) return null;
+  try {
+    await fetch(apiUrl(code), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ v: c.v, blob: c.blob }),
+    });
+  } catch { return null; }
+  return c;
 }
 async function serverPut(g, by) {
   const blob = await encodeGame(g);
@@ -775,7 +823,7 @@ async function serverPut(g, by) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ v: g.seq || 0, blob, meta }),
     });
-    if (r.ok) return { ok: true };
+    if (r.ok) { cacheBlob(g.code, g.seq || 0, blob); return { ok: true }; }
     if (r.status === 409) return { ok: false, conflict: await r.json() };
     return { ok: false };
   } catch { return { ok: false, offline: true }; }
@@ -1089,6 +1137,7 @@ export default function App() {
   const [booting, setBooting] = useState(true);
   const [lobby, setLobby] = useState(null);
   const [pushReady, setPushReady] = useState(false);
+  const [now, setNow] = useState(0);
   const gRef = useRef(null);
   gRef.current = g;
 
@@ -1104,9 +1153,14 @@ export default function App() {
   };
 
   const loadByCode = async (code) => {
-    const res = await serverGet(code);
+    let res = await serverGet(code);
     if (!res) {
-      setNote("Game " + code + " isn't on the server right now. If it was live recently the server may have restarted — ask anyone who still has the game open on their phone to reopen it, then tap your invite link again.");
+      // the server may have restarted — restore from this phone's backup
+      const c = await restoreGame(code);
+      if (c) res = c;
+    }
+    if (!res) {
+      setNote("Game " + code + " isn't on the server right now — probably a server restart. It comes back the moment anyone who was in the game opens Harbor on their phone, so ask in the chat, then tap the link again.");
       return false;
     }
     try { adopt(await decodeGame(res.blob)); setHashCode(code); return true; }
@@ -1148,7 +1202,8 @@ export default function App() {
       if (!list.length) { setLobby([]); return; }
       const out = [];
       for (const it of list) {
-        const res = await serverGet(it.code);
+        let res = await serverGet(it.code);
+        if (!res) { const c = await restoreGame(it.code); if (c) res = c; }
         if (!res) { out.push({ code: it.code, gone: true }); continue; }
         try {
           const gm = await decodeGame(res.blob);
@@ -1196,6 +1251,7 @@ export default function App() {
     if (!g) return;
     const code = g.code;
     const id = setInterval(async () => {
+      setNow(Date.now()); // keeps time-gated UI (deputy discard) fresh
       const cur = gRef.current;
       if (!cur || cur.code !== code) return;
       const res = await serverGet(code);
@@ -1554,6 +1610,16 @@ export default function App() {
           <Btn tone="warn" style={{ width: "100%", marginBottom: 10 }}
             onClick={() => setModal({ k: "discard" })}>Discard {owed} cards</Btn>
         )}
+
+        {/* someone wandered off mid-seven: after a long wait, anyone may throw
+            random cards for them (it's announced in the log) */}
+        {g.phase === "discard" && g.sevenAt > 0 && now - g.sevenAt > (window.HARBOR_DEPUTY_MS || 600000) &&
+          Object.keys(g.pendingDiscard).map(Number).filter((p) => p !== actor).map((p) => (
+            <Btn key={p} tone="warn" style={{ width: "100%", marginBottom: 10 }}
+              onClick={() => apply((d) => deputyDiscard(d, p, actor))}>
+              {pname(g, p)} is holding things up — discard {g.pendingDiscard[p]} random cards for them
+            </Btn>
+          ))}
 
         {myTurn && g.phase === "steal" && (
           <div style={{ marginBottom: 12 }}>
