@@ -323,7 +323,8 @@ function newGame(code, names) {
     code,
     seq: 0,
     createdAt: Date.now(),
-    players: names.map((nm, i) => ({ name: nm, color: i, claimed: false, lock: "" })),
+    hostTok: "",
+    players: names.map((nm, i) => ({ name: nm, color: i, claimed: false, lock: "", tok: "" })),
     board,
     buildings: {},
     roads: {},
@@ -340,7 +341,7 @@ function newGame(code, names) {
     turnNo: 0,
     rolls: [],
     sevenAt: 0,
-    phase: "setupTown",
+    phase: "lobby",
     setupOrder: order,
     setupIdx: 0,
     lastSetupVertex: null,
@@ -358,6 +359,60 @@ function newGame(code, names) {
 
 const say = (g, m) => { g.log.push({ t: Date.now(), m }); if (g.log.length > 120) g.log = g.log.slice(-120); };
 const pname = (g, i) => g.players[i]?.name ?? "?";
+
+/* ---------- lobby ---------- */
+const resetLobbyOrder = (g) => {
+  const b = Array.from({ length: g.players.length }, (_, i) => i);
+  g.setupOrder = [...b, ...b.slice().reverse()];
+  g.turn = 0;
+};
+function lobbyKick(g, i) {
+  const p = g.players[i];
+  if (g.phase !== "lobby" || !p || !p.claimed) return false;
+  say(g, `${p.name} was removed from the lobby.`);
+  p.claimed = false; p.tok = ""; p.lock = ""; p.name = `Player ${i + 1}`;
+  return g;
+}
+function lobbyRemoveSeat(g, i) {
+  if (g.phase !== "lobby" || g.players.length <= 2 || !g.players[i] || g.players[i].claimed) return false;
+  g.players.splice(i, 1); g.hands.splice(i, 1); g.devHands.splice(i, 1);
+  g.knights.splice(i, 1); g.roadLen.splice(i, 1);
+  g.players.forEach((p, j) => { p.color = j; if (!p.claimed) p.name = `Player ${j + 1}`; });
+  resetLobbyOrder(g);
+  say(g, "A seat was removed.");
+  return g;
+}
+function lobbyAddSeat(g) {
+  if (g.phase !== "lobby" || g.players.length >= 4) return false;
+  const j = g.players.length;
+  g.players.push({ name: `Player ${j + 1}`, color: j, claimed: false, lock: "", tok: "" });
+  g.hands.push(emptyHand()); g.devHands.push([]); g.knights.push(0); g.roadLen.push(0);
+  resetLobbyOrder(g);
+  say(g, "A seat was added.");
+  return g;
+}
+/* the moment everyone is in (or the host says go), shuffle who starts */
+function startLobby(g, dropOpen) {
+  if (g.phase !== "lobby") return false;
+  if (dropOpen) {
+    for (let i = g.players.length - 1; i >= 0; i--) {
+      if (!g.players[i].claimed) {
+        g.players.splice(i, 1); g.hands.splice(i, 1); g.devHands.splice(i, 1);
+        g.knights.splice(i, 1); g.roadLen.splice(i, 1);
+      }
+    }
+    g.players.forEach((p, j) => { p.color = j; });
+  }
+  const n = g.players.length;
+  if (n < 2 || g.players.some((p) => !p.claimed)) return false;
+  const base = shuffle(Array.from({ length: n }, (_, i) => i));
+  g.setupOrder = [...base, ...base.slice().reverse()];
+  g.setupIdx = 0;
+  g.turn = base[0];
+  g.phase = "setupTown";
+  say(g, `Anchors up — ${pname(g, g.turn)} places first.`);
+  return g;
+}
 
 /* ---------- setup phase ---------- */
 function placeSetupTown(g, v, p) {
@@ -655,7 +710,8 @@ function endTurn(g) {
 const T_LIST = ["hills", "forest", "pasture", "fields", "mountains", "desert"];
 const P_LIST = ["any", "brick", "lumber", "wool", "grain", "ore"];
 const D_LIST = ["knight", "vp", "road", "plenty", "monopoly"];
-const PH_LIST = ["setupTown", "setupRoad", "roll", "main", "discard", "robber", "steal", "over"];
+/* "lobby" must stay LAST — these indices are baked into every live blob */
+const PH_LIST = ["setupTown", "setupRoad", "roll", "main", "discard", "robber", "steal", "over", "lobby"];
 
 const VIDX = Object.keys(GEO.vertexPos).sort();
 const EIDX = Object.keys(GEO.edgeHexes).sort();
@@ -681,6 +737,8 @@ function pack(g) {
     n: g.players.map((p) => p.name),
     cl: g.players.map((p) => (p.claimed ? 1 : 0)),
     lk: g.players.map((p) => p.lock || ""),
+    tk: g.players.map((p) => p.tok || ""),
+    ht: g.hostTok || "",
     t: g.board.hexes.map((h) => T_LIST.indexOf(h.terrain)).join(""),
     m: g.board.hexes.map((h) => h.number || 0).join(","),
     rb: hI[g.board.robber],
@@ -742,7 +800,8 @@ function unpack(o) {
     v: 1, code: o.c,
     seq: o.q || 0,
     /* legacy blobs have no cl — everyone starts unclaimed and re-picks a seat */
-    players: o.n.map((nm, i) => ({ name: nm, color: i, claimed: !!(o.cl && o.cl[i]), lock: (o.lk && o.lk[i]) || "" })),
+    hostTok: o.ht || "",
+    players: o.n.map((nm, i) => ({ name: nm, color: i, claimed: !!(o.cl && o.cl[i]), lock: (o.lk && o.lk[i]) || "", tok: (o.tk && o.tk[i]) || "" })),
     board: { hexes, ports, robber: GEO.hexes[o.rb].id },
     buildings, roads,
     hands: o.h.map((x) => Object.fromEntries(RES.map((r, i) => [r, x[i]]))),
@@ -869,6 +928,20 @@ const hashWord = (s) => {
   return h.toString(36);
 };
 
+/* per-device identity token per game: lets a phone find its seat even after
+   lobby seats shift, and lets a kick actually stick */
+const tokKey = (code) => "harbor-tok-" + code;
+function tokOf(code) {
+  try { return window.localStorage.getItem(tokKey(code)) || ""; } catch { return ""; }
+}
+function makeTok(code) {
+  let t = tokOf(code);
+  if (t) return t;
+  t = Array.from({ length: 8 }, () => "abcdefghjkmnpqrstuvwxyz23456789"[Math.floor(Math.random() * 31)]).join("");
+  try { window.localStorage.setItem(tokKey(code), t); } catch { /* best effort */ }
+  return t;
+}
+
 const seatKey = (code) => "harbor-seat-" + code;
 function knownSeat(code) {
   try { const s = window.localStorage.getItem(seatKey(code)); return s == null ? null : +s; } catch { return null; }
@@ -967,6 +1040,27 @@ function Btn({ children, onClick, disabled, tone = "plain", style }) {
     }}>{children}</button>
   );
 }
+function Fireworks() {
+  const pieces = useMemo(() => Array.from({ length: 70 }, (_, i) => ({
+    left: Math.random() * 100,
+    delay: Math.random() * 3,
+    dur: 2.8 + Math.random() * 2.6,
+    color: [...PC.map((p) => p.hex), C.gold, C.parch][i % 6],
+    size: 5 + Math.random() * 7,
+    drift: -50 + Math.random() * 100,
+  })), []);
+  return (
+    <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 70, overflow: "hidden" }}>
+      <style>{"@keyframes hbFall{0%{transform:translateY(-8vh) translateX(0) rotate(0deg);opacity:1}85%{opacity:1}100%{transform:translateY(108vh) translateX(var(--dx)) rotate(720deg);opacity:.4}}"}</style>
+      {pieces.map((p, i) => (
+        <span key={i} style={{ position: "absolute", top: 0, left: p.left + "%", width: p.size, height: p.size * 0.55,
+          background: p.color, borderRadius: 1, "--dx": p.drift + "px",
+          animation: `hbFall ${p.dur}s linear ${p.delay}s infinite` }} />
+      ))}
+    </div>
+  );
+}
+
 function Die({ n, hot }) {
   const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
   return (
@@ -1244,8 +1338,9 @@ export default function App() {
             code: it.code,
             names: gm.players.filter((p) => p.claimed).map((p) => p.name).join(", "),
             turnName: pname(gm, gm.turn),
-            myTurn: s != null && gm.winner == null && (gm.turn === s || (gm.pendingDiscard[s] || 0) > 0),
+            myTurn: s != null && gm.winner == null && gm.phase !== "lobby" && (gm.turn === s || (gm.pendingDiscard[s] || 0) > 0),
             over: gm.winner != null,
+            inLobby: gm.phase === "lobby",
           });
         } catch { out.push({ code: it.code, gone: true }); }
       }
@@ -1253,6 +1348,21 @@ export default function App() {
     })();
     return () => { dead = true; };
   }, [g, booting]);
+
+  /* find my seat by device token — seats can shift in the lobby, and a kick
+     must actually unseat the kicked phone */
+  useEffect(() => {
+    if (!g) return;
+    const t = tokOf(g.code);
+    if (!t) return;
+    const idx = g.players.findIndex((p) => p.tok === t);
+    if (idx >= 0) {
+      if (idx !== seat) { setSeat(idx); rememberSeat(g.code, idx); }
+    } else if (seat != null && g.phase === "lobby") {
+      setSeat(null);
+      setNote("The host removed you from this game — you can take an open seat again if that was a mistake.");
+    }
+  }, [g, seat]);
 
   /* keep this phone's push subscription registered for the current game */
   useEffect(() => {
@@ -1350,6 +1460,9 @@ export default function App() {
     for (let tries = 0; tries < 5; tries++) {
       game = newGame(makeCode4(), seats);
       game.players[0].claimed = true;
+      const t = makeTok(game.code);
+      game.players[0].tok = t;
+      game.hostTok = t;
       game.seq = 1;
       r = await serverPut(game, 0);
       if (r.ok || !r.conflict) break; // a conflict means the code is taken — reroll it
@@ -1368,8 +1481,10 @@ export default function App() {
     const ok = await apply((d) => {
       if (d.players[i].claimed) return false;
       d.players[i].claimed = true;
+      d.players[i].tok = makeTok(d.code);
       if (nm) d.players[i].name = nm;
       say(d, `${d.players[i].name} joined the game.`);
+      if (d.phase === "lobby" && d.players.every((p) => p.claimed)) startLobby(d, false);
     });
     if (ok) { rememberSeat(gRef.current.code, i); rememberGame(gRef.current.code); setSeat(i); }
     else setNote((n) => n || "That seat was just taken — pick another.");
@@ -1382,7 +1497,10 @@ export default function App() {
       setNote("That's not " + p.name + "'s secret word.");
       return;
     }
-    const ok = await apply((d) => { say(d, `${d.players[i].name} rejoined from another phone.`); });
+    const ok = await apply((d) => {
+      d.players[i].tok = makeTok(d.code);
+      say(d, `${d.players[i].name} rejoined from another phone.`);
+    });
     if (ok) { rememberSeat(gRef.current.code, i); rememberGame(gRef.current.code); setSeat(i); }
   };
 
@@ -1410,6 +1528,7 @@ export default function App() {
                       {" · "}
                       {it.gone ? "unreachable right now"
                         : it.over ? "finished"
+                        : it.inLobby ? "in the lobby"
                         : it.myTurn ? "YOUR TURN"
                         : `waiting on ${it.turnName}`}
                       {it.names ? <span style={{ color: C.parchDim }}> — {it.names}</span> : null}
@@ -1501,6 +1620,59 @@ export default function App() {
             Your phone remembers your seat for this game — you only do this once. If you switch phones,
             use rejoin. You can set a secret word on your seat (tap your name card in the game) so nobody
             else can rejoin as you.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  /* ---- LOBBY ---- */
+  if (g.phase === "lobby") {
+    const isHost = g.hostTok && tokOf(g.code) === g.hostTok;
+    const aboard = g.players.filter((p) => p.claimed).length;
+    return (
+      <div style={{ minHeight: "100vh", background: C.ink, color: C.parch, fontFamily: bodyFont, padding: "28px 18px 60px" }}>
+        <style>{FONTS}</style>
+        <div style={{ maxWidth: 520, margin: "0 auto" }}>
+          <div style={{ fontFamily: dispFont, fontWeight: 300, fontSize: 44, letterSpacing: ".26em", lineHeight: 1 }}>HARBOR</div>
+          <div style={{ color: C.parchDim, marginTop: 10, fontSize: 15 }}>
+            Game {g.code} — the island appears when everyone's aboard.
+          </div>
+          <div style={{ marginTop: 20, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
+            <Eyebrow>Game lobby — {aboard} of {g.players.length} aboard</Eyebrow>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {g.players.map((p, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.line}`,
+                  borderRadius: 6, padding: "10px 12px", background: p.claimed ? "rgba(255,255,255,.04)" : "transparent" }}>
+                  <span style={{ width: 10, height: 10, borderRadius: 3, background: PC[p.color].hex }} />
+                  <span style={{ flex: 1, fontSize: 15, color: p.claimed ? C.parch : C.parchDim, fontStyle: p.claimed ? "normal" : "italic" }}>
+                    {p.claimed ? `${p.name}${i === seat ? " (you)" : ""}` : "open seat — waiting…"}
+                  </span>
+                  {isHost && p.claimed && i !== seat && (
+                    <Btn tone="warn" onClick={() => apply((d) => lobbyKick(d, i))} style={{ padding: "5px 10px", fontSize: 11 }}>Kick</Btn>
+                  )}
+                  {isHost && !p.claimed && g.players.length > 2 && (
+                    <Btn onClick={() => apply((d) => lobbyRemoveSeat(d, i))} style={{ padding: "5px 10px", fontSize: 11 }}>Remove</Btn>
+                  )}
+                </div>
+              ))}
+            </div>
+            {isHost && g.players.length < 4 && (
+              <Btn onClick={() => apply((d) => lobbyAddSeat(d))} style={{ width: "100%", marginTop: 10 }}>Add a seat</Btn>
+            )}
+          </div>
+          <Btn tone="go" onClick={share} style={{ width: "100%", marginTop: 14, padding: "13px", fontSize: 15 }}>
+            Send the invite link
+          </Btn>
+          {isHost && aboard >= 2 && aboard < g.players.length && (
+            <Btn tone="warn" onClick={() => apply((d) => startLobby(d, true))} style={{ width: "100%", marginTop: 10 }}>
+              Start with {aboard} — drop the empty seats
+            </Btn>
+          )}
+          {note && <div style={{ marginTop: 14, color: "#f0b9a8", lineHeight: 1.5 }}>{note}</div>}
+          <div style={{ marginTop: 18, color: C.parchDim, fontSize: 13, lineHeight: 1.6 }}>
+            The game starts itself the moment every seat is taken — turn order is drawn at random right then,
+            so nobody knows who goes first until the anchor drops.
           </div>
         </div>
       </div>
@@ -1640,9 +1812,10 @@ export default function App() {
       <div style={{ padding: "12px 14px" }}>
         {g.winner != null && (
           <div style={{ border: `1px solid ${C.gold}`, borderRadius: 7, padding: 14, marginBottom: 12, background: "rgba(224,164,55,.1)" }}>
-            <div style={{ fontFamily: dispFont, fontSize: 22, letterSpacing: ".12em" }}>{pname(g, g.winner).toUpperCase()} WINS</div>
+            <div style={{ fontFamily: dispFont, fontSize: 22, letterSpacing: ".12em" }}>🎆 {pname(g, g.winner).toUpperCase()} WINS 🎆</div>
           </div>
         )}
+        {g.winner != null && <Fireworks />}
 
         {/* a trade offer aimed at you — answer from any phase, any turn */}
         {g.trade && g.trade.to === actor && g.winner == null && (

@@ -87,11 +87,10 @@ await wait(A, (x) => x.document.querySelectorAll("input").length === 1);
 setInput(A, A.document.querySelector("input"), "Ann");
 await sleep(80);
 click(A, "Create game");
-await wait(A, (x) => H(x).includes("<svg"));
-// first player is randomized, so Ann is either up or watching
-check("creator lands on the board with seat 0", /Your turn, Ann|you're Ann/.test(H(A)));
-const code = (H(A).match(/HARBOR · ([A-Z0-9]{4})/) || [])[1];
-check("game code is visible in the header", !!code);
+await wait(A, (x) => H(x).includes("aboard"));
+check("creator lands in the lobby, not on the board", H(A).includes("1 of 4 aboard") && !H(A).includes("<svg"));
+const code = (H(A).match(/Game ([A-Z0-9]{4})/) || [])[1];
+check("game code is visible in the lobby", !!code);
 
 // ---- three more phones join via the one invite link ----
 const joinLink = BASE + "#g=" + code;
@@ -104,9 +103,12 @@ for (const name of ["Ben", "Cal", "Dot"]) {
   await sleep(80);
   const open = [...w.document.querySelectorAll("button")].find((b) => b.textContent.includes("Take this seat") && !b.disabled);
   tap(w, open);
-  check(`${name} claims a seat`, await wait(w, (x) => H(x).includes("<svg")));
+  // the last claimer trips the auto-start; earlier ones land in the lobby
+  check(`${name} claims a seat`, await wait(w, (x) => H(x).includes("aboard") || H(x).includes("<svg")));
   phones.push(w);
 }
+check("the game starts itself when the last seat fills",
+  (await Promise.all(phones.map((w) => wait(w, (x) => H(x).includes("<svg"), 6000)))).every(Boolean));
 check("claimed names sync to the creator's phone",
   await wait(A, (x) => H(x).includes("Ben") && H(x).includes("Cal") && H(x).includes("Dot")));
 
@@ -418,9 +420,8 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   click(E, "2");
   await sleep(80);
   click(E, "Create game");
-  await wait(E, (x) => H(x).includes("<svg"));
-  const code2 = (H(E).match(/HARBOR · ([A-Z0-9]{4})/) || [])[1];
-  check("two-player game is created with two seats", (H(E).match(/·\s*\d+d/g) || []).length === 2);
+  await wait(E, (x) => H(x).includes("aboard"));
+  const code2 = (H(E).match(/Game ([A-Z0-9]{4})/) || [])[1];
 
   const F = boot(BASE + "#g=" + code2);
   await wait(F, (x) => H(x).includes("pick your seat"));
@@ -429,6 +430,8 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   const open = [...F.document.querySelectorAll("button")].find((b) => b.textContent.includes("Take this seat") && !b.disabled);
   tap(F, open);
   await wait(F, (x) => H(x).includes("<svg"));
+  await wait(E, (x) => H(x).includes("<svg"));
+  check("two-player game auto-starts with two seats", (H(E).match(/·\s*\d+d/g) || []).length === 2);
 
   const pair = [E, F], order2 = [];
   for (let s = 0; s < 4; s++) {
@@ -445,6 +448,40 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     order2.join() === [order2[0], order2[1], order2[1], order2[0]].join());
   check("two-player setup reaches the roll phase",
     await wait(E, () => pair.some((w) => btn(w, "Roll the dice")), 6000));
+}
+
+// ---- lobby management: kick, and start with fewer than asked ----
+{
+  const G = boot(BASE);
+  await wait(G, (x) => x.document.querySelectorAll("input").length === 1);
+  setInput(G, G.document.querySelector("input"), "Trio");
+  await sleep(80);
+  click(G, "3"); await sleep(80);
+  click(G, "Create game");
+  await wait(G, (x) => H(x).includes("1 of 3 aboard"));
+  const code3 = (H(G).match(/Game ([A-Z0-9]{4})/) || [])[1];
+
+  const Hh = boot(BASE + "#g=" + code3);
+  await wait(Hh, (x) => H(x).includes("pick your seat"));
+  setInput(Hh, Hh.document.querySelector("input"), "Halle");
+  await sleep(80);
+  tap(Hh, [...Hh.document.querySelectorAll("button")].find((b) => b.textContent.includes("Take this seat") && !b.disabled));
+  await wait(Hh, (x) => H(x).includes("aboard"));
+  check("joiner waits in the lobby until the game is full", H(Hh).includes("2 of 3 aboard"));
+
+  await wait(G, (x) => H(x).includes("Halle"));
+  click(G, "Kick");
+  check("a kicked player is bounced back to the seat picker",
+    await wait(Hh, (x) => H(x).includes("pick your seat"), 4000));
+
+  // they take the seat again, then the host starts without the third
+  setInput(Hh, Hh.document.querySelector("input"), "Halle");
+  await sleep(80);
+  tap(Hh, [...Hh.document.querySelectorAll("button")].find((b) => b.textContent.includes("Take this seat") && !b.disabled));
+  await wait(G, (x) => H(x).includes("Halle"));
+  click(G, "Start with 2");
+  const started = await wait(G, (x) => H(x).includes("<svg"), 5000) && await wait(Hh, (x) => H(x).includes("<svg"), 5000);
+  check("the host can start with fewer, dropping the empty seat", started && (H(G).match(/·\s*\d+d/g) || []).length === 2);
 }
 
 srv.kill();
