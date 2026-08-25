@@ -275,6 +275,20 @@ check("every phone still shows a coherent board", phones.every((w) => H(w).inclu
   if (!offered) check("a trade offer could be sent", false);
 }
 
+// ---- path invite links, live OG previews, and spectator mode ----
+{
+  const page = await (await fetch(BASE + "g/" + code)).text();
+  check("the /g/CODE link previews the live game",
+    page.includes(`og:title" content="Harbor · ${code}"`) && / is up\. |aboard/.test(page));
+
+  const S = boot(BASE + "g/" + code); // fresh phone, all seats taken
+  await wait(S, (x) => H(x).includes("pick your seat"));
+  click(S, "Just watch this game");
+  const watching = await wait(S, (x) => H(x).includes("<svg"), 5000);
+  check("a spectator can watch without a seat",
+    watching && H(S).includes("watching") && !H(S).includes("YOUR HAND") && !btn(S, "Roll the dice"));
+}
+
 // ---- an outdated client goes read-only instead of corrupting state ----
 {
   const storage = {};
@@ -442,9 +456,14 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   await sleep(80);
   click(E, "2");
   await sleep(80);
+  click(E, "First to 8");
+  await sleep(80);
+  click(E, "Friendly robber");
+  await sleep(80);
   click(E, "Create game");
   await wait(E, (x) => H(x).includes("aboard"));
   const code2 = (H(E).match(/Game ([A-Z0-9]{4})/) || [])[1];
+  check("house rules show in the lobby", H(E).includes("First to 8") && H(E).includes("friendly robber"));
 
   const F = boot(BASE + "#g=" + code2);
   await wait(F, (x) => H(x).includes("pick your seat"));
@@ -569,6 +588,10 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     check("they land in the same new game with their seat kept",
       followed && !H(otherW).includes("pick your seat") && /you're Lose|Your turn, Lose/.test(H(otherW)));
     check("the rematch carries the series tally forward", H(otherW).includes("★1"));
+    click(otherW, "Log");
+    await sleep(200);
+    check("series stats show in the log sheet", /gained \d+ · stolen \d+ · sevens \d+/.test(H(otherW)));
+    click(otherW, "×");
   }
 }
 

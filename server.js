@@ -9,6 +9,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import webpush from "web-push";
+import { gunzipSync } from "zlib";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const read = (f) => fs.readFileSync(path.join(__dirname, f));
@@ -92,6 +93,47 @@ function notify(code, seat, payload, tag) {
   });
 }
 
+/* Live link previews: peek inside the blob (it's just gzipped JSON — the
+   server stays otherwise blob-blind) and rewrite the OG tags per game. */
+const htmlStr = html.toString();
+const escapeAttr = (s) => String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+function ogHtml(code) {
+  const g = games.get(code);
+  if (!g) return html;
+  try {
+    const b64 = g.blob.slice(1).replace(/-/g, "+").replace(/_/g, "/");
+    let raw = Buffer.from(b64, "base64");
+    if (g.blob[0] === "z") raw = gunzipSync(raw);
+    const o = JSON.parse(raw.toString());
+    const names = (o.n || []).filter((_, i) => o.cl && o.cl[i]).join(", ");
+    let desc;
+    if (o.w >= 0) desc = `${o.n[o.w]} won! ${names}`;
+    else if (o.ph === 8) desc = `In the lobby — ${(o.cl || []).filter(Boolean).length} of ${(o.n || []).length} aboard. Tap to take a seat.`;
+    else desc = `Game on — ${o.n[o.tu]} is up. ${names}`;
+    return htmlStr
+      .replace('<meta property="og:title" content="Harbor">', `<meta property="og:title" content="${escapeAttr("Harbor · " + code)}">`)
+      .replace(/<meta property="og:description" content="[^"]*">/, `<meta property="og:description" content="${escapeAttr(desc)}">`);
+  } catch { return html; }
+}
+
+/* If a turn (or a seven-discard) has sat untouched for a while, ping the
+   people the game is waiting on again — one push is easy to miss. */
+const NUDGE_MS = Number(process.env.HARBOR_NUDGE_MS) || 30 * 60 * 1000;
+setInterval(() => {
+  for (const [code, g] of games) {
+    if (!g.meta || g.meta.winner != null) continue;
+    const idle = Date.now() - g.t;
+    if (idle < NUDGE_MS) continue;
+    const nth = Math.floor(idle / NUDGE_MS);
+    if (nth > 2) continue; // two reminders, then let the group chat handle it
+    const targets = new Set([g.meta.turn, ...(Array.isArray(g.meta.discard) ? g.meta.discard : [])]);
+    for (const seat of targets) {
+      if (!Number.isInteger(seat)) continue;
+      notify(code, seat, { title: "Harbor · " + code, body: "Still your move — the island waits.", code }, `nudge:${seat}:${g.meta.tn}:${nth}`);
+    }
+  }
+}, Math.min(NUDGE_MS / 3, 5 * 60 * 1000));
+
 /* long-poll: GET ?since=N holds until the game moves past N (or ~20s) */
 const waiters = new Map(); // code -> Set of { res, timer }
 function flushWaiters(code) {
@@ -141,7 +183,7 @@ http.createServer((req, res) => {
           subs.delete(oldest[0]);
           pinged.delete(oldest[0]);
         }
-        games.set(code, { v, blob, t: Date.now() });
+        games.set(code, { v, blob, t: Date.now(), meta: meta && typeof meta === "object" ? meta : null });
         persist();
         flushWaiters(code);
         // the client tells us who is up; the server just delivers the nudge
@@ -198,6 +240,14 @@ http.createServer((req, res) => {
       return json(res, 200, { ok: true });
     });
     return;
+  }
+
+  /* /g/CODE serves the app with live OG tags, so the invite link previews
+     in iMessage as the actual game, not a generic page */
+  const pg = u.pathname.match(/^\/g\/([A-Za-z0-9]{4,8})$/);
+  if (pg && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
+    return res.end(ogHtml(pg[1].toUpperCase()));
   }
 
   if (req.url === "/health") {

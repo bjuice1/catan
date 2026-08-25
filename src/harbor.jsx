@@ -341,6 +341,9 @@ function newGame(code, names) {
     turnNo: 0,
     rolls: [],
     sevenAt: 0,
+    rules: { win: 10, friendly: false },
+    stats: names.map(() => [0, 0, 0]),       // gained, stolen, sevens (this game)
+    seriesStats: names.map(() => [0, 0, 0]), // same, summed over finished games
     phase: "lobby",
     setupOrder: order,
     setupIdx: 0,
@@ -360,8 +363,9 @@ function newGame(code, names) {
   };
 }
 
-/* 10 in every real game; the smoke test lowers it to reach a win quickly */
-const winAt = () => (typeof window !== "undefined" && window.HARBOR_WIN_AT) || 10;
+/* per-game house rule, 10 by default; the smoke test override wins so it can
+   reach a victory quickly */
+const winAt = (g) => (typeof window !== "undefined" && window.HARBOR_WIN_AT) || (g && g.rules && g.rules.win) || 10;
 
 /* Build stamp, injected by build.mjs. A client older than the state it reads
    must never write: it would silently strip every field it doesn't know
@@ -391,7 +395,7 @@ function lobbyKick(g, i) {
 function lobbyRemoveSeat(g, i) {
   if (g.phase !== "lobby" || g.players.length <= 2 || !g.players[i] || g.players[i].claimed) return false;
   g.players.splice(i, 1); g.hands.splice(i, 1); g.devHands.splice(i, 1);
-  g.knights.splice(i, 1); g.roadLen.splice(i, 1);
+  g.knights.splice(i, 1); g.roadLen.splice(i, 1); g.stats.splice(i, 1); g.seriesStats.splice(i, 1);
   g.players.forEach((p, j) => { p.color = j; if (!p.claimed) p.name = `Player ${j + 1}`; });
   resetLobbyOrder(g);
   say(g, "A seat was removed.");
@@ -402,6 +406,7 @@ function lobbyAddSeat(g) {
   const j = g.players.length;
   g.players.push({ name: `Player ${j + 1}`, color: j, claimed: false, lock: "", tok: "" });
   g.hands.push(emptyHand()); g.devHands.push([]); g.knights.push(0); g.roadLen.push(0);
+  g.stats.push([0, 0, 0]); g.seriesStats.push([0, 0, 0]);
   resetLobbyOrder(g);
   say(g, "A seat was added.");
   return g;
@@ -417,6 +422,9 @@ function makeRematch(prev, code) {
   });
   g.wins = prev.players.map((_, i) => (prev.wins?.[i] || 0) + (prev.winner === i ? 1 : 0));
   g.gameNo = (prev.gameNo || 1) + 1;
+  g.rules = { ...(prev.rules || { win: 10, friendly: false }) };
+  g.seriesStats = prev.players.map((_, i) =>
+    [0, 1, 2].map((k) => (prev.seriesStats?.[i]?.[k] || 0) + (prev.stats?.[i]?.[k] || 0)));
   g.log = [{ t: Date.now(), m: `Rematch — game ${g.gameNo} of the series.` }];
   startLobby(g, false);
   return g;
@@ -435,7 +443,7 @@ function startLobby(g, dropOpen) {
     for (let i = g.players.length - 1; i >= 0; i--) {
       if (!g.players[i].claimed) {
         g.players.splice(i, 1); g.hands.splice(i, 1); g.devHands.splice(i, 1);
-        g.knights.splice(i, 1); g.roadLen.splice(i, 1);
+        g.knights.splice(i, 1); g.roadLen.splice(i, 1); g.stats.splice(i, 1); g.seriesStats.splice(i, 1);
       }
     }
     g.players.forEach((p, j) => { p.color = j; });
@@ -511,6 +519,7 @@ function distribute(g, roll) {
       if (amt <= 0) return;
       g.hands[c.p][r] += amt;
       g.bank[r] -= amt;
+      if (g.stats?.[c.p]) g.stats[c.p][0] += amt;
       gained[c.p] = gained[c.p] || {};
       gained[c.p][r] = (gained[c.p][r] || 0) + amt;
     });
@@ -529,6 +538,7 @@ function rollDice(g) {
   if (g.rolls.length > 200) g.rolls = g.rolls.slice(-200);
   const sum = d1 + d2;
   say(g, `${pname(g, g.turn)} rolled ${sum} (${d1}+${d2}).`);
+  if (sum === 7 && g.stats?.[g.turn]) g.stats[g.turn][2] += 1;
   if (sum === 7) {
     const pend = {};
     g.hands.forEach((h, i) => { const t = handTotal(h); if (t > 7) pend[i] = Math.floor(t / 2); });
@@ -581,7 +591,10 @@ function moveRobber(g, hid, p) {
   const victims = new Set();
   h.verts.forEach((v) => {
     const b = g.buildings[v];
-    if (b && b.owner !== p && handTotal(g.hands[b.owner]) > 0) victims.add(b.owner);
+    if (!b || b.owner === p || handTotal(g.hands[b.owner]) === 0) return;
+    /* friendly robber house rule: players still below 3 points are safe */
+    if (g.rules?.friendly && scoreFor(g, b.owner, false) < 3) return;
+    victims.add(b.owner);
   });
   g.stealFrom = [...victims];
   say(g, `${pname(g, p)} moved the robber.`);
@@ -602,6 +615,7 @@ function stealFrom(g, victim, p) {
     const r = pool[Math.floor(Math.random() * pool.length)];
     g.hands[victim][r] -= 1;
     g.hands[p][r] += 1;
+    if (g.stats?.[p]) g.stats[p][1] += 1;
     say(g, `${pname(g, p)} stole a card from ${pname(g, victim)}.`);
     /* underscore fields are never pack()ed — this stays on the thief's phone */
     g._stole = { from: pname(g, victim), res: r };
@@ -722,7 +736,7 @@ function bankTrade(g, p, give, want) {
 /* ---------- turn end / win ---------- */
 function endTurn(g) {
   const p = g.turn;
-  if (scoreFor(g, p, true) >= winAt()) {
+  if (scoreFor(g, p, true) >= winAt(g)) {
     g.winner = p;
     g.phase = "over";
     say(g, `${pname(g, p)} reached 10 points and wins.`);
@@ -809,6 +823,9 @@ function pack(g) {
     ws: (g.wins || []).join(","),
     gn: g.gameNo || 1,
     av: Math.max(g.appV || 0, APP_V),
+    ru: [g.rules?.win || 10, g.rules?.friendly ? 1 : 0],
+    st: g.stats || g.players.map(() => [0, 0, 0]),
+    ss: g.seriesStats || g.players.map(() => [0, 0, 0]),
     lg: g.log.slice(-30).map((l) => l.m),
   };
 }
@@ -876,6 +893,9 @@ function unpack(o) {
     wins: o.ws ? o.ws.split(",").map(Number) : o.n.map(() => 0),
     gameNo: o.gn || 1,
     appV: o.av || 0,
+    rules: o.ru ? { win: o.ru[0] || 10, friendly: !!o.ru[1] } : { win: 10, friendly: false },
+    stats: o.st || o.n.map(() => [0, 0, 0]),
+    seriesStats: o.ss || o.n.map(() => [0, 0, 0]),
     log: o.lg.map((m) => ({ t: 0, m })),
   };
   g.players.forEach((_, i) => { g.roadLen[i] = longestRoadFor(g, i); });
@@ -1310,6 +1330,9 @@ export default function App() {
   const [note, setNote] = useState("");
   const [myName, setMyName] = useState("");
   const [myCount, setMyCount] = useState(4);
+  const [myWin, setMyWin] = useState(10);
+  const [myFriendly, setMyFriendly] = useState(false);
+  const [spectate, setSpectate] = useState(false);
   const [claimName, setClaimName] = useState("");
   const [rejoinSel, setRejoinSel] = useState(null);
   const [rejoinWord, setRejoinWord] = useState("");
@@ -1324,7 +1347,9 @@ export default function App() {
   gRef.current = g;
 
   const setHashCode = (code) => {
-    try { window.history.replaceState(null, "", "#g=" + code); }
+    // path URLs let the server serve live link previews; file:// and
+    // sandboxed frames refuse replaceState, so fall back to the hash
+    try { window.history.replaceState(null, "", "/g/" + code); }
     catch { try { window.location.hash = "g=" + code; } catch { /* nothing else to try */ } }
   };
 
@@ -1353,9 +1378,10 @@ export default function App() {
   useEffect(() => {
     (async () => {
       const h = window.location.hash.replace(/^#/, "");
+      const pm = window.location.pathname.match(/^\/g\/([A-Za-z0-9]{4,8})$/);
       const jm = h.match(/^g=([A-Za-z0-9]{4,8})$/);
-      if (jm) {
-        await loadByCode(jm[1].toUpperCase());
+      if (pm || jm) {
+        await loadByCode((pm ? pm[1] : jm[1]).toUpperCase());
       } else if (h) {
         /* old-style link with the whole game in it: sync it into the server
            and carry on in shared mode. Newest version wins. */
@@ -1456,8 +1482,8 @@ export default function App() {
   };
 
   const goHome = () => {
-    setG(null); setSeat(null); setNote(""); setLobby(null); setPushReady(false);
-    try { window.history.replaceState(null, "", window.location.pathname); }
+    setG(null); setSeat(null); setNote(""); setLobby(null); setPushReady(false); setSpectate(false);
+    try { window.history.replaceState(null, "", "/"); }
     catch { try { window.location.hash = ""; } catch { /* fine */ } }
   };
 
@@ -1511,7 +1537,7 @@ export default function App() {
         return false;
       }
       const inSetup = d.phase === "setupTown" || d.phase === "setupRoad";
-      if (!inSetup && d.phase !== "over" && scoreFor(d, d.turn, true) >= winAt()) {
+      if (!inSetup && d.phase !== "over" && scoreFor(d, d.turn, true) >= winAt(d)) {
         d.winner = d.turn; d.phase = "over";
         say(d, `${pname(d, d.turn)} reached 10 points and wins.`);
       }
@@ -1537,7 +1563,7 @@ export default function App() {
     return false;
   };
 
-  const inviteUrl = g ? window.location.origin + window.location.pathname + "#g=" + g.code : "";
+  const inviteUrl = g ? window.location.origin + "/g/" + g.code : "";
   const share = async () => {
     try {
       if (navigator.share) { await navigator.share({ text: `Join our Harbor game — code ${g.code}.`, url: inviteUrl }); return; }
@@ -1554,6 +1580,7 @@ export default function App() {
     let game = null, r = null;
     for (let tries = 0; tries < 5; tries++) {
       game = newGame(makeCode4(), seats);
+      game.rules = { win: myWin, friendly: myFriendly };
       game.players[0].claimed = true;
       const t = makeTok(game.code);
       game.players[0].tok = t;
@@ -1678,6 +1705,21 @@ export default function App() {
                   borderRadius: 5, padding: "10px", fontFamily: dispFont, fontSize: 15, cursor: "pointer" }}>{n}</button>
               ))}
             </div>
+            <Eyebrow>House rules</Eyebrow>
+            <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+              {[8, 10, 12].map((n) => (
+                <button key={n} onClick={() => setMyWin(n)} style={{ flex: 1,
+                  background: myWin === n ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+                  border: `1px solid ${myWin === n ? C.gold : C.line}`, color: myWin === n ? C.gold : C.parchDim,
+                  borderRadius: 5, padding: "9px", fontFamily: dispFont, fontSize: 13, cursor: "pointer" }}>First to {n}</button>
+              ))}
+            </div>
+            <button onClick={() => setMyFriendly(!myFriendly)} style={{ width: "100%", textAlign: "left",
+              background: myFriendly ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+              border: `1px solid ${myFriendly ? C.gold : C.line}`, color: myFriendly ? C.gold : C.parchDim,
+              borderRadius: 5, padding: "9px 12px", fontFamily: dispFont, fontSize: 13, cursor: "pointer", marginBottom: 12 }}>
+              Friendly robber {myFriendly ? "— on" : "— off"} <span style={{ textTransform: "none", fontFamily: bodyFont, fontSize: 12 }}>(no robbing anyone below 3 points)</span>
+            </button>
             <Btn tone="go" onClick={create} style={{ width: "100%" }}>Create game</Btn>
           </div>
           {note && <div style={{ marginTop: 16, color: "#f0b9a8", lineHeight: 1.5 }}>{note}</div>}
@@ -1694,7 +1736,7 @@ export default function App() {
   }
 
   /* ---- SEAT PICKER ---- */
-  if (seat == null) {
+  if (seat == null && !spectate) {
     return (
       <div style={{ minHeight: "100vh", background: C.ink, color: C.parch, fontFamily: bodyFont, padding: "28px 18px 60px" }}>
         <style>{FONTS}</style>
@@ -1739,6 +1781,9 @@ export default function App() {
             </div>
           </div>
           {note && <div style={{ marginTop: 16, color: "#f0b9a8", lineHeight: 1.5 }}>{note}</div>}
+          <Btn onClick={() => setSpectate(true)} style={{ width: "100%", marginTop: 14 }}>
+            Just watch this game
+          </Btn>
           <div style={{ marginTop: 18, color: C.parchDim, fontSize: 13, lineHeight: 1.6 }}>
             Your phone remembers your seat for this game — you only do this once. If you switch phones,
             use rejoin. You can set a secret word on your seat (tap your name card in the game) so nobody
@@ -1760,6 +1805,9 @@ export default function App() {
           <div style={{ fontFamily: dispFont, fontWeight: 300, fontSize: 44, letterSpacing: ".26em", lineHeight: 1 }}>HARBOR</div>
           <div style={{ color: C.parchDim, marginTop: 10, fontSize: 15 }}>
             Game {g.code} — the island appears when everyone's aboard.
+          </div>
+          <div style={{ color: C.gold, marginTop: 6, fontSize: 13, fontFamily: dispFont, letterSpacing: ".1em", textTransform: "uppercase" }}>
+            First to {g.rules?.win || 10}{g.rules?.friendly ? " · friendly robber" : ""}
           </div>
           <div style={{ marginTop: 20, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
             <Eyebrow>Game lobby — {aboard} of {g.players.length} aboard</Eyebrow>
@@ -1803,10 +1851,10 @@ export default function App() {
   }
 
   /* ---- derived ---- */
-  const actor = seat;
-  const hand = g.hands[actor];
-  const owed = g.pendingDiscard[actor] || 0;
-  const myTurn = g.turn === actor && g.winner == null;
+  const actor = seat; // null when spectating — every action below is gated on it
+  const hand = actor != null ? g.hands[actor] : emptyHand();
+  const owed = actor != null ? g.pendingDiscard[actor] || 0 : 0;
+  const myTurn = actor != null && g.turn === actor && g.winner == null;
   const canBuy = (k) => canAfford(hand, COST[k]);
   /* before rolling, only a knight may be played; one dev card per turn */
   const devPlayable = (c) => myTurn && (g.phase === "main" || (g.phase === "roll" && c.type === "knight"))
@@ -1925,7 +1973,9 @@ export default function App() {
       {g.winner == null && (
         <div style={{ padding: "8px 14px", background: "rgba(224,164,55,.1)", borderBottom: `1px solid ${C.line}`,
           fontFamily: dispFont, fontSize: 12, letterSpacing: ".12em", textTransform: "uppercase", color: C.gold }}>
-          {myTurn ? `Your turn, ${pname(g, actor)}` : `${pname(g, g.turn)}'s turn — you're ${pname(g, actor)}`}
+          {myTurn ? `Your turn, ${pname(g, actor)}`
+            : actor == null ? `${pname(g, g.turn)}'s turn — you're watching`
+            : `${pname(g, g.turn)}'s turn — you're ${pname(g, actor)}`}
         </div>
       )}
 
@@ -1989,10 +2039,12 @@ export default function App() {
                 </div>
               ))}
             </div>
-            <Btn tone="go" style={{ width: "100%", marginTop: 12, padding: "13px", fontSize: 15 }}
-              onClick={startRematch}>
-              {g.rematch ? "Join the rematch" : "Rematch — same crew, new island"}
-            </Btn>
+            {(actor != null || g.rematch) && (
+              <Btn tone="go" style={{ width: "100%", marginTop: 12, padding: "13px", fontSize: 15 }}
+                onClick={startRematch}>
+                {g.rematch ? "Join the rematch" : "Rematch — same crew, new island"}
+              </Btn>
+            )}
             <div style={{ marginTop: 8, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
               {g.rematch
                 ? "The next island is already waiting — everyone keeps their seat."
@@ -2026,7 +2078,7 @@ export default function App() {
 
         {/* someone wandered off mid-seven: after a long wait, anyone may throw
             random cards for them (it's announced in the log) */}
-        {g.phase === "discard" && g.sevenAt > 0 && now - g.sevenAt > (window.HARBOR_DEPUTY_MS || 600000) &&
+        {actor != null && g.phase === "discard" && g.sevenAt > 0 && now - g.sevenAt > (window.HARBOR_DEPUTY_MS || 600000) &&
           Object.keys(g.pendingDiscard).map(Number).filter((p) => p !== actor).map((p) => (
             <Btn key={p} tone="warn" style={{ width: "100%", marginBottom: 10 }}
               onClick={() => apply((d) => deputyDiscard(d, p, actor))}>
@@ -2118,7 +2170,7 @@ export default function App() {
           </div>
         )}
 
-        <div style={{ marginTop: 18, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
+        {actor != null && <div style={{ marginTop: 18, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
           <Eyebrow>Your hand — {handTotal(hand)} cards</Eyebrow>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {RES.map((r) => <Chip key={r} res={r} n={hand[r]} />)}
@@ -2128,7 +2180,7 @@ export default function App() {
               Cards: {g.devHands[actor].filter((c) => !c.used).map((c) => DEV_LABEL[c.type]).join(", ")}
             </div>
           )}
-        </div>
+        </div>}
       </div>
 
       {modal && <Modals modal={modal} setModal={setModal} g={g} actor={actor} hand={hand} apply={apply} owed={owed} setNote={setNote} />}
@@ -2170,12 +2222,12 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
   const [partner, setPartner] = useState(null);
   const [bankGive, setBankGive] = useState(null);
   const [bankWant, setBankWant] = useState(null);
-  const [newName, setNewName] = useState(g.players[actor].name);
+  const [newName, setNewName] = useState(actor != null ? g.players[actor].name : "");
   const [secretWord, setSecretWord] = useState("");
   useEffect(() => {
     setPick(emptyHand()); setGive(emptyHand()); setWant(emptyHand());
     setPlenty(emptyHand()); setPartner(null); setBankGive(null); setBankWant(null);
-    setNewName(g.players[actor].name); setSecretWord("");
+    setNewName(actor != null ? g.players[actor].name : ""); setSecretWord("");
   }, [modal.k]);
   const close = () => setModal(null);
   const cap = (n) => ({ brick: n, lumber: n, wool: n, grain: n, ore: n });
@@ -2187,14 +2239,22 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         {series && (
           <div style={{ marginBottom: 14, border: `1px solid ${C.line}`, borderRadius: 6, padding: 12 }}>
             <Eyebrow>Series — game {g.gameNo}</Eyebrow>
-            {standings(g).map((s, rank) => (
-              <div key={s.i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
-                <span style={{ width: 16, fontFamily: dispFont, fontSize: 12, color: C.parchDim }}>{rank + 1}</span>
-                <span style={{ width: 9, height: 9, borderRadius: 2, background: PC[g.players[s.i].color].hex }} />
-                <span style={{ flex: 1, fontSize: 14, color: rank === 0 && s.w > 0 ? C.gold : C.parch }}>{s.name}</span>
-                <span style={{ fontFamily: dispFont, fontSize: 15, color: rank === 0 && s.w > 0 ? C.gold : C.parch }}>{s.w}</span>
-              </div>
-            ))}
+            {standings(g).map((s, rank) => {
+              const tot = (k) => (g.seriesStats?.[s.i]?.[k] || 0) + (g.stats?.[s.i]?.[k] || 0);
+              return (
+                <div key={s.i} style={{ padding: "3px 0" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 16, fontFamily: dispFont, fontSize: 12, color: C.parchDim }}>{rank + 1}</span>
+                    <span style={{ width: 9, height: 9, borderRadius: 2, background: PC[g.players[s.i].color].hex }} />
+                    <span style={{ flex: 1, fontSize: 14, color: rank === 0 && s.w > 0 ? C.gold : C.parch }}>{s.name}</span>
+                    <span style={{ fontFamily: dispFont, fontSize: 15, color: rank === 0 && s.w > 0 ? C.gold : C.parch }}>{s.w}</span>
+                  </div>
+                  <div style={{ marginLeft: 33, fontSize: 11, color: C.parchDim }}>
+                    gained {tot(0)} · stolen {tot(1)} · sevens {tot(2)}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
         <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
