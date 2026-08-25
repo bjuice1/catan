@@ -353,9 +353,15 @@ function newGame(code, names) {
     devPlayed: false,
     trade: null,
     winner: null,
+    rematch: "",
+    wins: names.map(() => 0), // series tally, carried across rematches
+    gameNo: 1,
     log: [{ t: Date.now(), m: "Game created. Place your first town." }],
   };
 }
+
+/* 10 in every real game; the smoke test lowers it to reach a win quickly */
+const winAt = () => (typeof window !== "undefined" && window.HARBOR_WIN_AT) || 10;
 
 const say = (g, m) => { g.log.push({ t: Date.now(), m }); if (g.log.length > 120) g.log = g.log.slice(-120); };
 const pname = (g, i) => g.players[i]?.name ?? "?";
@@ -391,6 +397,28 @@ function lobbyAddSeat(g) {
   say(g, "A seat was added.");
   return g;
 }
+/* same crew, fresh island — everyone is already seated, so it starts at once */
+function makeRematch(prev, code) {
+  const g = newGame(code, prev.players.map((p) => p.name));
+  g.hostTok = prev.hostTok;
+  prev.players.forEach((p, i) => {
+    g.players[i].claimed = true;
+    g.players[i].tok = p.tok;
+    g.players[i].lock = p.lock;
+  });
+  g.wins = prev.players.map((_, i) => (prev.wins?.[i] || 0) + (prev.winner === i ? 1 : 0));
+  g.gameNo = (prev.gameNo || 1) + 1;
+  g.log = [{ t: Date.now(), m: `Rematch — game ${g.gameNo} of the series.` }];
+  startLobby(g, false);
+  return g;
+}
+
+/* standings including the game on screen, which isn't in wins[] until the
+   next rematch is created */
+const standings = (g) => g.players
+  .map((p, i) => ({ i, name: p.name, w: (g.wins?.[i] || 0) + (g.winner === i ? 1 : 0) }))
+  .sort((a, b) => b.w - a.w || a.i - b.i);
+
 /* the moment everyone is in (or the host says go), shuffle who starts */
 function startLobby(g, dropOpen) {
   if (g.phase !== "lobby") return false;
@@ -685,7 +713,7 @@ function bankTrade(g, p, give, want) {
 /* ---------- turn end / win ---------- */
 function endTurn(g) {
   const p = g.turn;
-  if (scoreFor(g, p, true) >= 10) {
+  if (scoreFor(g, p, true) >= winAt()) {
     g.winner = p;
     g.phase = "over";
     say(g, `${pname(g, p)} reached 10 points and wins.`);
@@ -768,6 +796,9 @@ function pack(g) {
     fr: g.freeRoads,
     dp: g.devPlayed ? 1 : 0,
     w: g.winner == null ? -1 : g.winner,
+    rm: g.rematch || "",
+    ws: (g.wins || []).join(","),
+    gn: g.gameNo || 1,
     lg: g.log.slice(-30).map((l) => l.m),
   };
 }
@@ -831,6 +862,9 @@ function unpack(o) {
       want: Object.fromEntries(RES.map((r, i) => [r, o.tr[7 + i]])),
     } : null,
     winner: o.w < 0 ? null : o.w,
+    rematch: o.rm || "",
+    wins: o.ws ? o.ws.split(",").map(Number) : o.n.map(() => 0),
+    gameNo: o.gn || 1,
     log: o.lg.map((m) => ({ t: 0, m })),
   };
   g.players.forEach((_, i) => { g.roadLen[i] = longestRoadFor(g, i); });
@@ -907,6 +941,7 @@ async function serverPut(g, by) {
     discard: Object.keys(g.pendingDiscard || {}).map(Number),
     winner: g.winner == null ? null : g.winner,
     tradeTo: g.trade ? g.trade.to : null,
+    rematch: g.rematch || null,
   };
   try {
     const r = await fetch(apiUrl(g.code), {
@@ -1397,8 +1432,12 @@ export default function App() {
       const cur = gRef.current;
       if (!cur || cur.code !== code) return;
       const res = await serverGet(code);
-      if (!res) { serverPut(cur); return; } // server restarted — reseed it from here
-      if (res.v > (cur.seq || 0)) {
+      // we may have moved on mid-fetch (a rematch, or back to the lobby) —
+      // re-check before letting a stale reply overwrite the live game
+      const now = gRef.current;
+      if (!now || now.code !== code) return;
+      if (!res) { serverPut(now); return; } // server restarted — reseed it from here
+      if (res.v > (now.seq || 0)) {
         try { setG(await decodeGame(res.blob)); } catch { /* skip a bad poll */ }
       }
     }, window.HARBOR_POLL_MS || 3000);
@@ -1416,7 +1455,8 @@ export default function App() {
         if (attempt > 0) setNote("Someone else moved first — that move no longer works.");
         return false;
       }
-      if (d.phase !== "over" && scoreFor(d, d.turn, true) >= 10) {
+      const inSetup = d.phase === "setupTown" || d.phase === "setupRoad";
+      if (!inSetup && d.phase !== "over" && scoreFor(d, d.turn, true) >= winAt()) {
         d.winner = d.turn; d.phase = "over";
         say(d, `${pname(d, d.turn)} reached 10 points and wins.`);
       }
@@ -1473,6 +1513,34 @@ export default function App() {
     setSeat(0);
     setG(game);
     setHashCode(game.code);
+  };
+
+  /* ---- rematch: same players, new board, no re-claiming seats ---- */
+  const joinRematch = async (newCode) => {
+    const prev = gRef.current;
+    const t = tokOf(prev.code);
+    // seat indices are preserved across a rematch, so carry both across
+    if (t) { try { window.localStorage.setItem(tokKey(newCode), t); } catch { /* best effort */ } }
+    if (seat != null) rememberSeat(newCode, seat);
+    rememberGame(newCode);
+    setNote("");
+    await loadByCode(newCode);
+  };
+
+  const startRematch = async () => {
+    const prev = gRef.current;
+    if (prev.rematch) return joinRematch(prev.rematch);
+    let fresh = null, r = null;
+    for (let tries = 0; tries < 5; tries++) {
+      fresh = makeRematch(prev, makeCode4());
+      fresh.seq = 1;
+      r = await serverPut(fresh, seat);
+      if (r.ok || !r.conflict) break; // conflict means the code is taken — reroll
+    }
+    if (!r || !r.ok) { setNote("Couldn't start the rematch — try again in a moment."); return; }
+    // point the finished game at the new one so everyone else can follow
+    await apply((d) => { d.rematch = fresh.code; say(d, `${pname(d, seat)} called a rematch.`); });
+    await joinRematch(fresh.code);
   };
 
   /* ---- claim a seat ---- */
@@ -1770,6 +1838,7 @@ export default function App() {
               <div style={{ fontSize: 10, color: C.parchDim, fontFamily: dispFont, letterSpacing: ".06em" }}>
                 {handTotal(g.hands[i])}c · {g.devHands[i].filter((c) => !c.used).length}d
                 {g.longestRoad === i ? " · LR" : ""}{g.largestArmy === i ? " · LA" : ""}
+                {g.wins?.[i] ? ` · ★${g.wins[i]}` : ""}
               </div>
             </div>
           ))}
@@ -1813,6 +1882,26 @@ export default function App() {
         {g.winner != null && (
           <div style={{ border: `1px solid ${C.gold}`, borderRadius: 7, padding: 14, marginBottom: 12, background: "rgba(224,164,55,.1)" }}>
             <div style={{ fontFamily: dispFont, fontSize: 22, letterSpacing: ".12em" }}>🎆 {pname(g, g.winner).toUpperCase()} WINS 🎆</div>
+            <div style={{ marginTop: 10, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
+              <Eyebrow>Series — {g.gameNo} game{g.gameNo === 1 ? "" : "s"} in</Eyebrow>
+              {standings(g).map((s, rank) => (
+                <div key={s.i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                  <span style={{ width: 16, fontFamily: dispFont, fontSize: 12, color: C.parchDim }}>{rank + 1}</span>
+                  <span style={{ width: 9, height: 9, borderRadius: 2, background: PC[g.players[s.i].color].hex }} />
+                  <span style={{ flex: 1, fontSize: 14, color: rank === 0 ? C.gold : C.parch }}>{s.name}</span>
+                  <span style={{ fontFamily: dispFont, fontSize: 15, color: rank === 0 ? C.gold : C.parch }}>{s.w}</span>
+                </div>
+              ))}
+            </div>
+            <Btn tone="go" style={{ width: "100%", marginTop: 12, padding: "13px", fontSize: 15 }}
+              onClick={startRematch}>
+              {g.rematch ? "Join the rematch" : "Rematch — same crew, new island"}
+            </Btn>
+            <div style={{ marginTop: 8, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
+              {g.rematch
+                ? "The next island is already waiting — everyone keeps their seat."
+                : "Everyone lands straight in, seats and all. Turn order is redrawn."}
+            </div>
           </div>
         )}
         {g.winner != null && <Fireworks />}
@@ -1996,8 +2085,22 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
   const cap = (n) => ({ brick: n, lumber: n, wool: n, grain: n, ore: n });
 
   if (modal.k === "log") {
+    const series = (g.gameNo || 1) > 1 || (g.wins || []).some((w) => w > 0);
     return (
       <Sheet title="Recent moves" onClose={close}>
+        {series && (
+          <div style={{ marginBottom: 14, border: `1px solid ${C.line}`, borderRadius: 6, padding: 12 }}>
+            <Eyebrow>Series — game {g.gameNo}</Eyebrow>
+            {standings(g).map((s, rank) => (
+              <div key={s.i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                <span style={{ width: 16, fontFamily: dispFont, fontSize: 12, color: C.parchDim }}>{rank + 1}</span>
+                <span style={{ width: 9, height: 9, borderRadius: 2, background: PC[g.players[s.i].color].hex }} />
+                <span style={{ flex: 1, fontSize: 14, color: rank === 0 && s.w > 0 ? C.gold : C.parch }}>{s.name}</span>
+                <span style={{ fontFamily: dispFont, fontSize: 15, color: rank === 0 && s.w > 0 ? C.gold : C.parch }}>{s.w}</span>
+              </div>
+            ))}
+          </div>
+        )}
         <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
           {g.log.slice().reverse().map((l, i) => (
             <div key={i} style={{ color: i === 0 ? C.parch : C.parchDim, fontSize: 14, lineHeight: 1.4 }}>{l.m}</div>

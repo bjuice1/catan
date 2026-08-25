@@ -42,10 +42,11 @@ srv.stderr.on("data", (c) => { srvErr += c; });
   if (!up) { console.log(srvErr.slice(0, 500)); process.exit(1); }
 }
 
-function boot(url, seedStorage) {
+function boot(url, seedStorage, globals) {
   const dom = new JSDOM('<!doctype html><html><body><div id=root></div></body></html>',
     { url, runScripts: "outside-only", pretendToBeVisual: true });
   const w = dom.window;
+  if (globals) Object.assign(w, globals);
   Object.assign(w, {
     CompressionStream: globalThis.CompressionStream,
     DecompressionStream: globalThis.DecompressionStream,
@@ -482,6 +483,71 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   click(G, "Start with 2");
   const started = await wait(G, (x) => H(x).includes("<svg"), 5000) && await wait(Hh, (x) => H(x).includes("<svg"), 5000);
   check("the host can start with fewer, dropping the empty seat", started && (H(G).match(/·\s*\d+d/g) || []).length === 2);
+}
+
+// ---- winning, then a one-tap rematch that keeps everyone seated ----
+{
+  // a victory target of 2 is reached by the two setup settlements, so the
+  // first roll after setup ends the game — real games are always 10
+  const WIN = { HARBOR_WIN_AT: 2 };
+  const P = boot(BASE, null, WIN);
+  await wait(P, (x) => x.document.querySelectorAll("input").length === 1);
+  setInput(P, P.document.querySelector("input"), "Win");
+  await sleep(80);
+  click(P, "2"); await sleep(80);
+  click(P, "Create game");
+  await wait(P, (x) => H(x).includes("aboard"));
+  const codeW = (H(P).match(/Game ([A-Z0-9]{4})/) || [])[1];
+
+  const Q = boot(BASE + "#g=" + codeW, null, WIN);
+  await wait(Q, (x) => H(x).includes("pick your seat"));
+  setInput(Q, Q.document.querySelector("input"), "Lose");
+  await sleep(80);
+  tap(Q, [...Q.document.querySelectorAll("button")].find((b) => b.textContent.includes("Take this seat") && !b.disabled));
+  const pair = [P, Q];
+  await Promise.all(pair.map((w) => wait(w, (x) => H(x).includes("<svg"), 6000)));
+
+  // setup
+  for (let s = 0; s < 4; s++) {
+    const w = await activePlacer(pair);
+    if (!w) break;
+    const sp = spots(w); tap(w, sp[Math.floor(Math.random() * sp.length)]);
+    await wait(w, (x) => roadPicks(x).length > 0);
+    const rd = roadPicks(w); tap(w, rd[Math.floor(Math.random() * rd.length)]);
+    await sleep(200);
+  }
+
+  // with the target at 2, the two setup settlements already win it — the
+  // first roll of the game ends it, no grinding required
+  const roller = await (async () => {
+    for (let i = 0; i < 60; i++) { const w = pair.find((x) => btn(x, "Roll the dice")); if (w) return w; await sleep(100); }
+    return null;
+  })();
+  if (roller) { click(roller, "Roll the dice"); await sleep(400); }
+  const won = (await Promise.all(pair.map((w) => wait(w, (x) => H(x).includes("WINS"), 6000)))).every(Boolean);
+  check("a win ends the game on every phone", won);
+
+  if (won) {
+    const winnerW = pair.find((w) => btn(w, "Rematch")) || pair[0];
+    const otherW = pair.find((w) => w !== winnerW);
+    check("the winner is offered a rematch", !!btn(winnerW, "Rematch"));
+    const winnerH = H(winnerW);
+    click(winnerW, "Rematch");
+    const moved = await wait(winnerW, (x) => H(x).includes("<svg") && !H(x).includes("WINS"), 8000);
+    const newCode = (H(winnerW).match(/HARBOR · ([A-Z0-9]{4})/) || [])[1];
+    check("the rematch starts a fresh game, already seated",
+      moved && !!newCode && newCode !== codeW && !H(winnerW).includes("pick your seat"));
+
+    check("the series leaderboard counts the win", /Series — 1 game in/.test(winnerH) && /★1|1<\/span>/.test(winnerH));
+
+    const invited = await wait(otherW, (x) => H(x).includes("Join the rematch"), 8000);
+    check("the other player is invited into the rematch", invited);
+    click(otherW, "Join the rematch");
+    const followed = await wait(otherW, (x) => H(x).includes("HARBOR · " + newCode), 8000);
+    check("they land in the same new game with their seat kept",
+      followed && !H(otherW).includes("pick your seat") && /you're Lose|Your turn, Lose/.test(H(otherW)));
+    check("the rematch carries the series tally forward", H(otherW).includes("★1"));
+  }
 }
 
 srv.kill();

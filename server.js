@@ -119,7 +119,13 @@ http.createServer((req, res) => {
         persist();
         // the client tells us who is up; the server just delivers the nudge
         if (meta && typeof meta === "object") {
-          const { turn, tn, by, discard, winner, tradeTo } = meta;
+          const { turn, tn, by, discard, winner, tradeTo, rematch } = meta;
+          if (typeof rematch === "string" && rematch) {
+            const gameSubs = subs.get(code) || new Map();
+            for (const seat of gameSubs.keys()) {
+              if (seat !== by) notify(code, seat, { title: "Harbor · " + code, body: "A rematch is starting — tap to join.", code }, `rm:${seat}:${rematch}`);
+            }
+          }
           if (Number.isInteger(tradeTo) && tradeTo !== by && winner == null) {
             notify(code, tradeTo, { title: "Harbor · " + code, body: "You have a trade offer.", code }, `trade:${tradeTo}:${v}`);
           }
