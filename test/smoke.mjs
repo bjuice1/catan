@@ -81,6 +81,16 @@ const wait = async (w, fn, ms = 5000) => {
   while (Date.now() - t0 < ms) { if (fn(w)) return true; await sleep(60); }
   return false;
 };
+// board taps only aim; the "... here" confirm button commits the placement
+const confirmPick = async (w) => {
+  for (let i = 0; i < 25; i++) {
+    const b = [...w.document.querySelectorAll("button")].find((x) => / here$/.test(x.textContent.trim()));
+    if (b) { tap(w, b); return true; }
+    await sleep(60);
+  }
+  return false;
+};
+const place = async (w, el) => { tap(w, el); await confirmPick(w); };
 
 // ---- create a game on phone A ----
 const A = boot(BASE);
@@ -128,9 +138,9 @@ for (let s = 0; s < 8; s++) {
   const w = await activePlacer();
   if (!w) { check(`setup step ${s} has an active phone`, false); break; }
   order.push((H(w).match(/Your turn, ([A-Za-z]+)/) || [])[1]);
-  const sp = spots(w); tap(w, sp[Math.floor(Math.random() * sp.length)]);
+  const sp = spots(w); await place(w, sp[Math.floor(Math.random() * sp.length)]);
   await wait(w, (x) => roadPicks(x).length > 0);
-  const rd = roadPicks(w); tap(w, rd[Math.floor(Math.random() * rd.length)]);
+  const rd = roadPicks(w); await place(w, rd[Math.floor(Math.random() * rd.length)]);
   await sleep(200);
   noHandoffs();
 }
@@ -191,7 +201,7 @@ for (let t = 0; t < 35; t++) {
   const robberW = phones.find((w) => H(w).includes("move the robber"));
   if (robberW) {
     const hx = [...robberW.document.querySelectorAll("polygon")].filter((p) => p.getAttribute("stroke") === "#e0a437");
-    if (hx.length) { tap(robberW, hx[0]); robbers++; await sleep(280); }
+    if (hx.length) { await place(robberW, hx[0]); robbers++; await sleep(280); }
   }
   const stealer = phones.find((w) => H(w).includes("Rob one of them"));
   if (stealer) {
@@ -231,7 +241,7 @@ check("every phone still shows a coherent board", phones.every((w) => H(w).inclu
     const robberW = phones.find((w) => H(w).includes("move the robber"));
     if (robberW) {
       const hx = [...robberW.document.querySelectorAll("polygon")].filter((p) => p.getAttribute("stroke") === "#e0a437");
-      if (hx.length) { tap(robberW, hx[0]); await sleep(280); }
+      if (hx.length) { await place(robberW, hx[0]); await sleep(280); }
     }
     const stealer = phones.find((w) => H(w).includes("Rob one of them"));
     if (stealer) {
@@ -263,6 +273,18 @@ check("every phone still shows a coherent board", phones.every((w) => H(w).inclu
     check("declining clears the offer for the offerer", declined);
   }
   if (!offered) check("a trade offer could be sent", false);
+}
+
+// ---- an outdated client goes read-only instead of corrupting state ----
+{
+  const storage = {};
+  for (let i = 0; i < A.localStorage.length; i++) { const k = A.localStorage.key(i); storage[k] = A.localStorage.getItem(k); }
+  const OLD = boot(joinLink, storage, { HARBOR_APP_V: 1 }); // a phone running ancient code
+  const warned = await wait(OLD, (x) => H(x).includes("newer Harbor"), 5000);
+  check("an outdated phone sees the refresh banner", warned);
+  const fresh = boot(joinLink, storage);
+  const clean = await wait(fresh, (x) => H(x).includes("<svg"), 5000);
+  check("a current phone sees no version warning", clean && !H(fresh).includes("newer Harbor"));
 }
 
 // ---- roll history travels through the codec and shows hot/cold ----
@@ -439,9 +461,9 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     const w = await activePlacer(pair);
     if (!w) break;
     order2.push((H(w).match(/Your turn, ([A-Za-z]+)/) || [])[1]);
-    const sp = spots(w); tap(w, sp[Math.floor(Math.random() * sp.length)]);
+    const sp = spots(w); await place(w, sp[Math.floor(Math.random() * sp.length)]);
     await wait(w, (x) => roadPicks(x).length > 0);
-    const rd = roadPicks(w); tap(w, rd[Math.floor(Math.random() * rd.length)]);
+    const rd = roadPicks(w); await place(w, rd[Math.floor(Math.random() * rd.length)]);
     await sleep(200);
   }
   check("two-player draft is a randomized snake",
@@ -511,9 +533,9 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   for (let s = 0; s < 4; s++) {
     const w = await activePlacer(pair);
     if (!w) break;
-    const sp = spots(w); tap(w, sp[Math.floor(Math.random() * sp.length)]);
+    const sp = spots(w); await place(w, sp[Math.floor(Math.random() * sp.length)]);
     await wait(w, (x) => roadPicks(x).length > 0);
-    const rd = roadPicks(w); tap(w, rd[Math.floor(Math.random() * rd.length)]);
+    const rd = roadPicks(w); await place(w, rd[Math.floor(Math.random() * rd.length)]);
     await sleep(200);
   }
 

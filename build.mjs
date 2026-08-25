@@ -9,7 +9,7 @@ const result = await esbuild.build({
   minify: true,
   format: "iife",
   loader: { ".jsx": "jsx" },
-  define: { "process.env.NODE_ENV": '"production"' },
+  define: { "process.env.NODE_ENV": '"production"', __APP_V__: String(Date.now()) },
   write: false,
   outfile: "bundle.js",
 });

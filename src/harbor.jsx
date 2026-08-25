@@ -363,6 +363,15 @@ function newGame(code, names) {
 /* 10 in every real game; the smoke test lowers it to reach a win quickly */
 const winAt = () => (typeof window !== "undefined" && window.HARBOR_WIN_AT) || 10;
 
+/* Build stamp, injected by build.mjs. A client older than the state it reads
+   must never write: it would silently strip every field it doesn't know
+   about. The window override exists only so the smoke test can play an
+   outdated phone. */
+/* global __APP_V__ */
+const APP_V = (typeof window !== "undefined" && window.HARBOR_APP_V) ||
+  (typeof __APP_V__ !== "undefined" ? __APP_V__ : 0);
+const clientOutdated = (g) => (g.appV || 0) > APP_V;
+
 const say = (g, m) => { g.log.push({ t: Date.now(), m }); if (g.log.length > 120) g.log = g.log.slice(-120); };
 const pname = (g, i) => g.players[i]?.name ?? "?";
 
@@ -799,6 +808,7 @@ function pack(g) {
     rm: g.rematch || "",
     ws: (g.wins || []).join(","),
     gn: g.gameNo || 1,
+    av: Math.max(g.appV || 0, APP_V),
     lg: g.log.slice(-30).map((l) => l.m),
   };
 }
@@ -865,6 +875,7 @@ function unpack(o) {
     rematch: o.rm || "",
     wins: o.ws ? o.ws.split(",").map(Number) : o.n.map(() => 0),
     gameNo: o.gn || 1,
+    appV: o.av || 0,
     log: o.lg.map((m) => ({ t: 0, m })),
   };
   g.players.forEach((_, i) => { g.roadLen[i] = longestRoadFor(g, i); });
@@ -1175,7 +1186,7 @@ function BuildRow({ label, cost, note, disabled, active, onClick }) {
 }
 
 /* board is unchanged from the shared-storage build */
-function Board({ g, sel, onPick }) {
+function Board({ g, sel, onPick, pending }) {
   const b = g.board;
   const opts = sel ? sel.options : null;
   const roadPath = (e) => {
@@ -1233,7 +1244,10 @@ function Board({ g, sel, onPick }) {
                 <circle cx={h.cx} cy={h.cy - 8.3} r="1.5" fill="#141414" />
               </g>
             )}
-            {target && <polygon points={pts} fill="rgba(224,164,55,.22)" stroke={C.gold} strokeWidth="0.9"
+            {target && <polygon points={pts}
+              fill={pending && pending.id === h.id ? "rgba(239,230,210,.3)" : "rgba(224,164,55,.22)"}
+              stroke={pending && pending.id === h.id ? C.parch : C.gold}
+              strokeWidth={pending && pending.id === h.id ? 1.4 : 0.9}
               style={{ cursor: "pointer" }} onClick={() => onPick(h.id)} />}
           </g>
         );
@@ -1259,9 +1273,11 @@ function Board({ g, sel, onPick }) {
       })}
       {sel && sel.kind === "road" && [...opts].map((e) => {
         const r = roadPath(e);
+        const aimed = pending && pending.id === e;
         return (
           <g key={e}>
-            <line x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={C.gold} strokeWidth="1.1" opacity="0.75" strokeDasharray="1.6 1.2" />
+            <line x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={aimed ? C.parch : C.gold}
+              strokeWidth={aimed ? 2 : 1.1} opacity={aimed ? 1 : 0.75} strokeDasharray={aimed ? "none" : "1.6 1.2"} />
             <line x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke="transparent" strokeWidth="6"
               style={{ cursor: "pointer" }} onClick={() => onPick(e)} />
           </g>
@@ -1269,9 +1285,11 @@ function Board({ g, sel, onPick }) {
       })}
       {sel && (sel.kind === "town" || sel.kind === "city") && [...opts].map((v) => {
         const p = GEO.vertexPos[v];
+        const aimed = pending && pending.id === v;
         return (
           <g key={v}>
-            <circle cx={p.x} cy={p.y} r="2.4" fill="rgba(224,164,55,.3)" stroke={C.gold} strokeWidth="0.8" />
+            <circle cx={p.x} cy={p.y} r={aimed ? 3.2 : 2.4} fill={aimed ? "rgba(239,230,210,.55)" : "rgba(224,164,55,.3)"}
+              stroke={aimed ? C.parch : C.gold} strokeWidth={aimed ? 1.1 : 0.8} />
             <circle cx={p.x} cy={p.y} r="5.2" fill="transparent" style={{ cursor: "pointer" }} onClick={() => onPick(v)} />
           </g>
         );
@@ -1299,6 +1317,9 @@ export default function App() {
   const [lobby, setLobby] = useState(null);
   const [pushReady, setPushReady] = useState(false);
   const [now, setNow] = useState(0);
+  const [pending, setPending] = useState(null);
+  const [gains, setGains] = useState(null);
+  const prevRollRef = useRef(null);
   const gRef = useRef(null);
   gRef.current = g;
 
@@ -1399,6 +1420,23 @@ export default function App() {
     }
   }, [g, seat]);
 
+  /* float a "+2 🌾" over the board when a roll pays out to this seat */
+  useEffect(() => {
+    if (!g || seat == null || !g.hands[seat]) { prevRollRef.current = null; return; }
+    const prev = prevRollRef.current;
+    const snap = { code: g.code, rollsLen: g.rolls.length, hand: { ...g.hands[seat] }, seat };
+    prevRollRef.current = snap;
+    if (!prev || prev.code !== g.code || prev.seat !== seat) return;
+    if (g.rolls.length <= prev.rollsLen) return;
+    const got = RES.filter((r) => g.hands[seat][r] > prev.hand[r])
+      .map((r) => `+${g.hands[seat][r] - prev.hand[r]} ${RES_ICON[r]}`);
+    if (got.length) {
+      const key = Date.now();
+      setGains({ text: got.join("  "), key });
+      setTimeout(() => setGains((cur) => (cur && cur.key === key ? null : cur)), 2600);
+    }
+  }, [g, seat]);
+
   /* keep this phone's push subscription registered for the current game */
   useEffect(() => {
     if (!g || seat == null) return;
@@ -1423,30 +1461,47 @@ export default function App() {
     catch { try { window.location.hash = ""; } catch { /* fine */ } }
   };
 
-  /* poll the server for other players' moves */
+  /* watch the server for other players' moves. Long-poll: the request holds
+     open until something changes, so hand-offs land near-instantly while the
+     wire stays quiet between moves. */
   useEffect(() => {
     if (!g) return;
     const code = g.code;
-    const id = setInterval(async () => {
-      setNow(Date.now()); // keeps time-gated UI (deputy discard) fresh
-      const cur = gRef.current;
-      if (!cur || cur.code !== code) return;
-      const res = await serverGet(code);
-      // we may have moved on mid-fetch (a rematch, or back to the lobby) —
-      // re-check before letting a stale reply overwrite the live game
-      const now = gRef.current;
-      if (!now || now.code !== code) return;
-      if (!res) { serverPut(now); return; } // server restarted — reseed it from here
-      if (res.v > (now.seq || 0)) {
-        try { setG(await decodeGame(res.blob)); } catch { /* skip a bad poll */ }
+    let dead = false;
+    const tick = setInterval(() => setNow(Date.now()), 3000); // time-gated UI (deputy discard)
+    (async () => {
+      while (!dead) {
+        const cur = gRef.current;
+        if (!cur || cur.code !== code) return;
+        let res = null, missing = false;
+        try {
+          const r = await fetch(apiUrl(code) + "?since=" + (cur.seq || 0));
+          if (r.status === 404) missing = true;
+          else if (r.ok) res = await r.json();
+        } catch { /* offline — retry after the delay */ }
+        if (dead) return;
+        // we may have moved on mid-hold (a rematch, or back to the lobby) —
+        // re-check before letting a stale reply overwrite the live game
+        const now2 = gRef.current;
+        if (!now2 || now2.code !== code) return;
+        if (missing) serverPut(now2); // server restarted — reseed it from here
+        else if (res && res.blob && res.v > (now2.seq || 0)) {
+          cacheBlob(code, res.v, res.blob);
+          try { setG(await decodeGame(res.blob)); } catch { /* skip a bad reply */ }
+        }
+        await new Promise((r) => setTimeout(r, window.HARBOR_POLL_MS || 1200));
       }
-    }, window.HARBOR_POLL_MS || 3000);
-    return () => clearInterval(id);
+    })();
+    return () => { dead = true; clearInterval(tick); };
   }, [g && g.code]);
 
   /* run a mutation, push it, and rebase-retry if someone else moved first */
   const apply = async (fn) => {
     let latest = gRef.current;
+    if (latest && clientOutdated(latest)) {
+      setNote("A newer Harbor is running this game — refresh this page before making a move.");
+      return false;
+    }
     for (let attempt = 0; attempt < 3; attempt++) {
       const d = clone(latest);
       let out;
@@ -1771,8 +1826,17 @@ export default function App() {
   })();
   const effSel = autoSel || (g.phase === "main" ? sel : null);
 
+  /* first tap only aims; nothing is built until Confirm — fingers on small
+     corners misfire, and every placement is instantly synced and permanent */
   const onPick = (id) => {
     if (!effSel || !myTurn) return;
+    setPending({ kind: effSel.kind, id });
+  };
+  const pendingValid = pending && effSel && pending.kind === effSel.kind && effSel.options.has(pending.id);
+  const confirmPick = () => {
+    if (!pendingValid) { setPending(null); return; }
+    const id = pending.id;
+    setPending(null);
     if (effSel.kind === "robber") return apply((d) => moveRobber(d, id, actor));
     if (g.phase === "setupTown") return apply((d) => placeSetupTown(d, id, actor));
     if (g.phase === "setupRoad") return apply((d) => placeSetupRoad(d, id, actor));
@@ -1780,6 +1844,7 @@ export default function App() {
     if (effSel.kind === "town") return apply((d) => buildTown(d, id, actor));
     if (effSel.kind === "city") return apply((d) => buildCity(d, id, actor));
   };
+  const confirmLabel = { town: "Found the town here", city: "Raise the city here", road: "Lay the road here", robber: "Move the robber here" };
 
   const status = (() => {
     if (g.winner != null) return `${pname(g, g.winner)} wins with ${scoreFor(g, g.winner, true)} points.`;
@@ -1808,6 +1873,17 @@ export default function App() {
   return (
     <div style={{ minHeight: "100vh", background: C.ink, color: C.parch, fontFamily: bodyFont, paddingBottom: 24 }}>
       <style>{FONTS}</style>
+
+      {/* outdated shell: read-only until refreshed */}
+      {clientOutdated(g) && (
+        <div style={{ padding: "10px 14px", background: "rgba(164,85,61,.25)", borderBottom: `1px solid #a4553d`,
+          display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ flex: 1, fontSize: 13, lineHeight: 1.4 }}>
+            Someone's playing on a newer Harbor. Refresh to catch up — until then this phone can only watch.
+          </span>
+          <Btn tone="go" onClick={() => window.location.reload()} style={{ padding: "8px 12px", fontSize: 12 }}>Refresh</Btn>
+        </div>
+      )}
 
       {/* header */}
       <div style={{ padding: "12px 14px 8px", borderBottom: `1px solid ${C.line}` }}>
@@ -1853,7 +1929,27 @@ export default function App() {
         </div>
       )}
 
-      <Board g={g} sel={effSel} onPick={onPick} />
+      <div style={{ position: "relative" }}>
+        <Board g={g} sel={effSel} onPick={onPick} pending={pendingValid ? pending : null} />
+        {gains && (
+          <div key={gains.key} style={{ position: "absolute", top: "38%", left: 0, right: 0, textAlign: "center",
+            pointerEvents: "none", fontFamily: dispFont, fontSize: 30, color: C.gold,
+            textShadow: "0 2px 8px rgba(0,0,0,.85)", animation: "hbGain 2.6s ease-out forwards" }}>
+            <style>{"@keyframes hbGain{0%{opacity:0;transform:translateY(14px)}12%{opacity:1;transform:translateY(0)}75%{opacity:1}100%{opacity:0;transform:translateY(-16px)}}"}</style>
+            {gains.text}
+          </div>
+        )}
+      </div>
+
+      {/* nothing is placed until this is tapped */}
+      {pendingValid && (
+        <div style={{ display: "flex", gap: 8, padding: "10px 14px", borderTop: `1px solid ${C.line}`, background: "rgba(224,164,55,.07)" }}>
+          <Btn tone="go" style={{ flex: 1, padding: "12px", fontSize: 15 }} onClick={confirmPick}>
+            {confirmLabel[pending.kind] || "Confirm"}
+          </Btn>
+          <Btn onClick={() => setPending(null)} style={{ padding: "12px 14px" }}>Cancel</Btn>
+        </div>
+      )}
 
       <div style={{ padding: "10px 14px", borderTop: `1px solid ${C.line}`, borderBottom: `1px solid ${C.line}` }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>

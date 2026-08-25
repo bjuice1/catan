@@ -92,13 +92,39 @@ function notify(code, seat, payload, tag) {
   });
 }
 
+/* long-poll: GET ?since=N holds until the game moves past N (or ~20s) */
+const waiters = new Map(); // code -> Set of { res, timer }
+function flushWaiters(code) {
+  const set = waiters.get(code);
+  if (!set) return;
+  waiters.delete(code);
+  const g = games.get(code);
+  for (const w of set) {
+    clearTimeout(w.timer);
+    if (g) json(w.res, 200, { v: g.v, blob: g.blob });
+    else json(w.res, 404, { error: "no such game" });
+  }
+}
+
 http.createServer((req, res) => {
-  const m = req.url.match(/^\/api\/g\/([A-Z0-9]{4,8})$/);
+  const u = new URL(req.url, "http://harbor.local");
+  const m = u.pathname.match(/^\/api\/g\/([A-Z0-9]{4,8})$/);
   if (m) {
     const code = m[1];
     if (req.method === "GET") {
       const g = games.get(code);
-      return g ? json(res, 200, { v: g.v, blob: g.blob }) : json(res, 404, { error: "no such game" });
+      if (!g) return json(res, 404, { error: "no such game" });
+      const since = Number(u.searchParams.get("since"));
+      if (!Number.isInteger(since) || g.v > since) return json(res, 200, { v: g.v, blob: g.blob });
+      // nothing new: hold the request open until a PUT lands or we time out
+      let set = waiters.get(code);
+      if (!set) { set = new Set(); waiters.set(code, set); }
+      if (set.size >= 32) return json(res, 200, { unchanged: true });
+      const w = { res, timer: null };
+      w.timer = setTimeout(() => { set.delete(w); json(res, 200, { unchanged: true }); }, 20000);
+      set.add(w);
+      req.on("close", () => { clearTimeout(w.timer); set.delete(w); });
+      return;
     }
     if (req.method === "PUT") {
       readBody(req, (body) => {
@@ -117,6 +143,7 @@ http.createServer((req, res) => {
         }
         games.set(code, { v, blob, t: Date.now() });
         persist();
+        flushWaiters(code);
         // the client tells us who is up; the server just delivers the nudge
         if (meta && typeof meta === "object") {
           const { turn, tn, by, discard, winner, tradeTo, rematch } = meta;

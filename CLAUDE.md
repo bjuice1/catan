@@ -59,7 +59,20 @@ test/smoke.mjs    Real server + four jsdom phones. See below.
 - **The log is truncated to 5 entries** in the link. The group chat is the real
   history.
 - **`history.replaceState` throws on `file://`** and in sandboxed frames, so
-  `publish()` falls back to setting `location.hash`. Keep both paths.
+  `setHashCode()` falls back to setting `location.hash`. Keep both paths.
+- **The blob carries a build stamp (`av`).** build.mjs injects `__APP_V__`;
+  a client that reads state stamped newer than itself goes read-only with a
+  refresh banner instead of writing (an old client writing would silently
+  strip every field it doesn't know about). Never remove this guard, and
+  remember that any new pack field only reaches safety once every phone has
+  refreshed past the build that added it.
+- **Board taps only aim.** Placement commits on the "... here" confirm button
+  — the smoke test's `place()` helper does tap-then-confirm. Don't make any
+  board tap apply immediately again; misclicked placements are permanent and
+  synced.
+- **GET /api/g/:code?since=N long-polls** (~20s hold, flushed on PUT). The
+  client poll loop and the lobby/serverGet paths are different code — the
+  loop uses `since`, everything else gets an immediate response.
 
 ## Rules coverage
 
