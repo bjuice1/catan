@@ -1875,7 +1875,7 @@ export default function App() {
             ))}
           </div>
         )}
-        {note && <div style={{ marginTop: 6, color: "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
+        {note && <div style={{ marginTop: 6, color: note.startsWith("You stole") ? C.gold : "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
       </div>
 
       <div style={{ padding: "12px 14px" }}>
