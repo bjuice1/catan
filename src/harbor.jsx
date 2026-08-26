@@ -560,6 +560,10 @@ function rollDice(g) {
 }
 
 function doDiscard(g, p, sel, deputy) {
+  /* the hand can change between choosing and landing (rebase after a
+     conflict) — never let a discard push a resource negative */
+  if (!RES.every((r) => g.hands[p][r] >= (sel[r] || 0))) return false;
+  if (!g.pendingDiscard[p]) return false;
   RES.forEach((r) => { g.hands[p][r] -= sel[r] || 0; g.bank[r] += sel[r] || 0; });
   delete g.pendingDiscard[p];
   say(g, deputy == null
@@ -627,7 +631,9 @@ function stealFrom(g, victim, p) {
 
 /* ---------- building ---------- */
 function buildRoad(g, e, p) {
+  if (g.roads[e] !== undefined) return false;
   const free = g.freeRoads > 0;
+  if (!free && !canAfford(g.hands[p], COST.road)) return false;
   if (free) {
     g.freeRoads -= 1;
   } else {
@@ -640,6 +646,7 @@ function buildRoad(g, e, p) {
   return g;
 }
 function buildTown(g, v, p) {
+  if (g.buildings[v] || !canAfford(g.hands[p], COST.settlement)) return false;
   pay(g.hands[p], COST.settlement);
   RES.forEach((r) => { g.bank[r] += COST.settlement[r] || 0; });
   g.buildings[v] = { owner: p, type: "settlement" };
@@ -648,6 +655,9 @@ function buildTown(g, v, p) {
   return g;
 }
 function buildCity(g, v, p) {
+  if (!canAfford(g.hands[p], COST.city)) return false;
+  const b = g.buildings[v];
+  if (!b || b.owner !== p || b.type !== "settlement") return false;
   pay(g.hands[p], COST.city);
   RES.forEach((r) => { g.bank[r] += COST.city[r] || 0; });
   g.buildings[v] = { owner: p, type: "city" };
@@ -655,6 +665,7 @@ function buildCity(g, v, p) {
   return g;
 }
 function buyDev(g, p) {
+  if (!canAfford(g.hands[p], COST.dev) || !g.devDeck.length) return false;
   pay(g.hands[p], COST.dev);
   RES.forEach((r) => { g.bank[r] += COST.dev[r] || 0; });
   const card = g.devDeck.pop();
@@ -725,6 +736,7 @@ function declineTrade(g, byOfferer) {
 
 function bankTrade(g, p, give, want) {
   const rate = tradeRate(g, p, give);
+  if (g.hands[p][give] < rate || g.bank[want] < 1) return false;
   g.hands[p][give] -= rate;
   g.bank[give] += rate;
   g.hands[p][want] += 1;
@@ -1106,22 +1118,27 @@ function Btn({ children, onClick, disabled, tone = "plain", style }) {
     }}>{children}</button>
   );
 }
-function Fireworks() {
-  const pieces = useMemo(() => Array.from({ length: 70 }, (_, i) => ({
+function Fireworks({ letter }) {
+  const won = letter === "W";
+  const pieces = useMemo(() => Array.from({ length: 60 }, (_, i) => ({
     left: Math.random() * 100,
     delay: Math.random() * 3,
-    dur: 2.8 + Math.random() * 2.6,
-    color: [...PC.map((p) => p.hex), C.gold, C.parch][i % 6],
-    size: 5 + Math.random() * 7,
+    dur: won ? 2.8 + Math.random() * 2.6 : 3.6 + Math.random() * 3, // losses fall slower. heavier.
+    color: won
+      ? [C.gold, C.parch, "#e8c76a", PC[0].hex][i % 4]
+      : ["#6d7a84", "#8b96a0", "#a4553d", "#4a555e"][i % 4],
+    size: 13 + Math.random() * 11,
     drift: -50 + Math.random() * 100,
-  })), []);
+    spin: Math.random() < 0.5 ? 360 : -360,
+  })), [won]);
   return (
     <div style={{ position: "fixed", inset: 0, pointerEvents: "none", zIndex: 70, overflow: "hidden" }}>
-      <style>{"@keyframes hbFall{0%{transform:translateY(-8vh) translateX(0) rotate(0deg);opacity:1}85%{opacity:1}100%{transform:translateY(108vh) translateX(var(--dx)) rotate(720deg);opacity:.4}}"}</style>
+      <style>{"@keyframes hbFall{0%{transform:translateY(-8vh) translateX(0) rotate(0deg);opacity:1}85%{opacity:1}100%{transform:translateY(108vh) translateX(var(--dx)) rotate(var(--rot));opacity:.35}}"}</style>
       {pieces.map((p, i) => (
-        <span key={i} style={{ position: "absolute", top: 0, left: p.left + "%", width: p.size, height: p.size * 0.55,
-          background: p.color, borderRadius: 1, "--dx": p.drift + "px",
-          animation: `hbFall ${p.dur}s linear ${p.delay}s infinite` }} />
+        <span key={i} style={{ position: "absolute", top: 0, left: p.left + "%",
+          color: p.color, fontFamily: dispFont, fontWeight: 600, fontSize: p.size,
+          textShadow: "0 1px 3px rgba(0,0,0,.6)", "--dx": p.drift + "px", "--rot": p.spin + "deg",
+          animation: `hbFall ${p.dur}s linear ${p.delay}s infinite` }}>{letter}</span>
       ))}
     </div>
   );
@@ -2052,7 +2069,7 @@ export default function App() {
             </div>
           </div>
         )}
-        {g.winner != null && <Fireworks />}
+        {g.winner != null && <Fireworks letter={actor == null || actor === g.winner ? "W" : "L"} />}
 
         {/* a trade offer aimed at you — answer from any phase, any turn */}
         {g.trade && g.trade.to === actor && g.winner == null && (

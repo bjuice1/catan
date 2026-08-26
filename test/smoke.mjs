@@ -216,6 +216,9 @@ check("sevens were resolved from each phone", sevens === 0 || discards >= sevens
 check("a table-mate can discard for an away player", sevens === 0 || deputyWorked);
 check("no phone was ever asked to send a link", !sawHandoffScreen);
 check("every phone still shows a coherent board", phones.every((w) => H(w).includes("<svg") && H(w).includes("HARBOR · " + code)));
+// the negative-wheat bug: a discard rebased onto a changed hand once pushed
+// a resource below zero — no phone may ever show a negative count
+check("no hand ever goes negative", phones.every((w) => !/>-\d/.test(H(w))));
 
 // ---- trade offers travel to the target's phone ----
 {
@@ -569,10 +572,16 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   check("a win ends the game on every phone", won);
 
   if (won) {
-    const winnerW = pair.find((w) => btn(w, "Rematch")) || pair[0];
-    const otherW = pair.find((w) => w !== winnerW);
+    // both phones offer the rematch — the banner names the actual winner
+    const winName = (H(pair[0]).match(/([A-Za-z]+) WINS/) || [])[1];
+    const winnerW = winName === "WIN" ? P : Q;
+    const otherW = winnerW === P ? Q : P;
     check("the winner is offered a rematch", !!btn(winnerW, "Rematch"));
     const winnerH = H(winnerW);
+    const confettiOf = (h) => ((h.match(/>([WL])<\/span>/g) || []).map((m) => m[1]));
+    const wConf = confettiOf(winnerH), lConf = confettiOf(H(otherW));
+    check("the winner's phone rains Ws", wConf.length > 20 && wConf.every((c) => c === "W"));
+    check("the loser's phone rains Ls", lConf.length > 20 && lConf.every((c) => c === "L"));
     click(winnerW, "Rematch");
     const moved = await wait(winnerW, (x) => H(x).includes("<svg") && !H(x).includes("WINS"), 8000);
     const newCode = (H(winnerW).match(/HARBOR · ([A-Z0-9]{4})/) || [])[1];
