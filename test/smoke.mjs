@@ -94,8 +94,8 @@ const place = async (w, el) => { tap(w, el); await confirmPick(w); };
 
 // ---- create a game on phone A ----
 const A = boot(BASE);
-await wait(A, (x) => x.document.querySelectorAll("input").length === 1);
-setInput(A, A.document.querySelector("input"), "Ann");
+await wait(A, (x) => !!x.document.querySelector('input[placeholder="Your name"]'));
+setInput(A, A.document.querySelector('input[placeholder="Your name"]'), "Ann");
 await sleep(80);
 click(A, "Create game");
 await wait(A, (x) => H(x).includes("aboard"));
@@ -274,6 +274,22 @@ check("no hand ever goes negative", phones.every((w) => !/>-\d/.test(H(w))));
     click(target, "Decline");
     declined = await wait(me, (x) => !H(x).includes("Waiting on"), 4000);
     check("declining clears the offer for the offerer", declined);
+    check("the offerer is told their trade was declined",
+      await wait(me, (x) => H(x).includes("declined your trade"), 4000));
+
+    // an unanswered offer expires by itself (fast expiry via the test knob)
+    me.HARBOR_TRADE_MS = 1500;
+    click(me, "trade"); await sleep(120);
+    tap(me, btn(me, "Offer a trade")); await sleep(150);
+    const toBtns2 = [...me.document.querySelectorAll("button")].filter((b) => Object.keys(seatOf).includes(b.textContent.trim()));
+    tap(me, toBtns2[0]); await sleep(100);
+    const pluses2 = [...me.document.querySelectorAll("button")].filter((b) => b.textContent === "+");
+    tap(me, pluses2.slice(0, 5).find((b) => !b.disabled)); await sleep(80);
+    tap(me, pluses2[5]); await sleep(80);
+    click(me, "Send the offer"); await sleep(200);
+    const expiredOk = await wait(me, (x) => !H(x).includes("Waiting on") && H(x).includes("expired"), 12000);
+    if (!expiredOk) console.log("DBG waiting:", H(me).includes("Waiting on"), "| expired:", H(me).includes("expired"), "| offerBtn:", !!btn(me, "Offer a trade"), "| txt:", (H(me).match(/Expires in[^<]*/) || [])[0]);
+    check("an unanswered trade offer expires on its own", expiredOk);
   }
   if (!offered) check("a trade offer could be sent", false);
 }
@@ -454,8 +470,8 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
 // ---- a two-player game works end to end through setup ----
 {
   const E = boot(BASE);
-  await wait(E, (x) => x.document.querySelectorAll("input").length === 1);
-  setInput(E, E.document.querySelector("input"), "Uno");
+  await wait(E, (x) => !!x.document.querySelector('input[placeholder="Your name"]'));
+  setInput(E, E.document.querySelector('input[placeholder="Your name"]'), "Uno");
   await sleep(80);
   click(E, "2");
   await sleep(80);
@@ -498,8 +514,8 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
 // ---- lobby management: kick, and start with fewer than asked ----
 {
   const G = boot(BASE);
-  await wait(G, (x) => x.document.querySelectorAll("input").length === 1);
-  setInput(G, G.document.querySelector("input"), "Trio");
+  await wait(G, (x) => !!x.document.querySelector('input[placeholder="Your name"]'));
+  setInput(G, G.document.querySelector('input[placeholder="Your name"]'), "Trio");
   await sleep(80);
   click(G, "3"); await sleep(80);
   click(G, "Create game");
@@ -535,8 +551,8 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   // first roll after setup ends the game — real games are always 10
   const WIN = { HARBOR_WIN_AT: 2 };
   const P = boot(BASE, null, WIN);
-  await wait(P, (x) => x.document.querySelectorAll("input").length === 1);
-  setInput(P, P.document.querySelector("input"), "Win");
+  await wait(P, (x) => !!x.document.querySelector('input[placeholder="Your name"]'));
+  setInput(P, P.document.querySelector('input[placeholder="Your name"]'), "Win");
   await sleep(80);
   click(P, "2"); await sleep(80);
   click(P, "Create game");
@@ -594,8 +610,11 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     check("the other player is invited into the rematch", invited);
     click(otherW, "Join the rematch");
     const followed = await wait(otherW, (x) => H(x).includes("HARBOR · " + newCode), 8000);
+    // the winner is whoever the random draft favoured — the follower is the other name
+    const loserName = winName === "WIN" ? "Lose" : "Win";
     check("they land in the same new game with their seat kept",
-      followed && !H(otherW).includes("pick your seat") && /you're Lose|Your turn, Lose/.test(H(otherW)));
+      followed && !H(otherW).includes("pick your seat")
+      && new RegExp(`you're ${loserName}|Your turn, ${loserName}`).test(H(otherW)));
     check("the rematch carries the series tally forward", H(otherW).includes("★1"));
     click(otherW, "Log");
     await sleep(200);

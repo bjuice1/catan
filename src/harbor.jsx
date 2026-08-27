@@ -6,7 +6,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
    ============================================================ */
 
 const RES = ["brick", "lumber", "wool", "grain", "ore"];
-const RES_LABEL = { brick: "Brick", lumber: "Lumber", wool: "Wool", grain: "Grain", ore: "Ore" };
+const RES_LABEL = { brick: "Brick", lumber: "Wood", wool: "Bas", grain: "Wheat", ore: "Ore" };
 const RES_ICON = { brick: "🧱", lumber: "🪵", wool: "🐑", grain: "🌾", ore: "🪨" };
 const TERRAIN_ICON = { hills: "🧱", forest: "🌲", pasture: "🐑", fields: "🌾", mountains: "🪨", desert: "🏜️" };
 const TERRAIN_RES = {
@@ -704,15 +704,23 @@ function playDev(g, p, idx, payload) {
 /* ---------- trading ---------- */
 const fmtHand = (h) => RES.filter((r) => h[r] > 0).map((r) => `${h[r]} ${RES_LABEL[r].toLowerCase()}`).join(" + ") || "nothing";
 
+const TRADE_MS = () => (typeof window !== "undefined" && window.HARBOR_TRADE_MS) || 5 * 60 * 1000;
+const tradeExpired = (t) => t && Date.now() - (t.at || 0) > TRADE_MS();
+
 function offerTrade(g, from, to, give, want) {
   if (!RES.every((r) => g.hands[from][r] >= (give[r] || 0))) return false;
-  g.trade = { from, to, give, want };
+  g.trade = { from, to, give, want, at: Date.now() };
   say(g, `${pname(g, from)} offered ${pname(g, to)} a trade: ${fmtHand(give)} for ${fmtHand(want)}.`);
   return g;
 }
 function acceptTrade(g) {
   const t = g.trade;
   if (!t) return false;
+  if (tradeExpired(t)) {
+    g.trade = null;
+    say(g, "The trade offer expired before it was answered.");
+    return g;
+  }
   const ok = RES.every((r) => g.hands[t.from][r] >= (t.give[r] || 0) && g.hands[t.to][r] >= (t.want[r] || 0));
   g.trade = null;
   if (!ok) {
@@ -820,7 +828,7 @@ function pack(g) {
     so: g.setupOrder.slice(0, g.players.length).join(""),
     rl: g.rolls.join(","),
     sa: g.sevenAt || 0,
-    tr: g.trade ? [g.trade.from, g.trade.to, ...RES.map((r) => g.trade.give[r] || 0), ...RES.map((r) => g.trade.want[r] || 0)] : 0,
+    tr: g.trade ? [g.trade.from, g.trade.to, ...RES.map((r) => g.trade.give[r] || 0), ...RES.map((r) => g.trade.want[r] || 0), g.trade.at || 0] : 0,
     ph: PH_LIST.indexOf(g.phase),
     si: g.setupIdx,
     lv: g.lastSetupVertex == null ? -1 : vI[g.lastSetupVertex],
@@ -899,6 +907,7 @@ function unpack(o) {
       from: o.tr[0], to: o.tr[1],
       give: Object.fromEntries(RES.map((r, i) => [r, o.tr[2 + i]])),
       want: Object.fromEntries(RES.map((r, i) => [r, o.tr[7 + i]])),
+      at: o.tr[12] || 0,
     } : null,
     winner: o.w < 0 ? null : o.w,
     rematch: o.rm || "",
@@ -1046,6 +1055,13 @@ function forgetGame(code) {
 }
 
 /* ---------- push notifications ---------- */
+/* true when running as a browser tab rather than the installed app */
+const inBrowserTab = () => {
+  try {
+    return !(window.navigator.standalone || window.matchMedia("(display-mode: standalone)").matches);
+  } catch { return true; }
+};
+
 const pushSupported = () =>
   typeof window !== "undefined" && "serviceWorker" in window.navigator &&
   "PushManager" in window && "Notification" in window;
@@ -1351,6 +1367,7 @@ export default function App() {
   const [myFriendly, setMyFriendly] = useState(false);
   const [spectate, setSpectate] = useState(false);
   const [claimName, setClaimName] = useState("");
+  const [joinCode, setJoinCode] = useState("");
   const [rejoinSel, setRejoinSel] = useState(null);
   const [rejoinWord, setRejoinWord] = useState("");
   const [booting, setBooting] = useState(true);
@@ -1360,6 +1377,7 @@ export default function App() {
   const [pending, setPending] = useState(null);
   const [gains, setGains] = useState(null);
   const prevRollRef = useRef(null);
+  const prevTradeRef = useRef(null);
   const gRef = useRef(null);
   gRef.current = g;
 
@@ -1479,6 +1497,33 @@ export default function App() {
       setTimeout(() => setGains((cur) => (cur && cur.key === key ? null : cur)), 2600);
     }
   }, [g, seat]);
+
+  /* tell the offerer how their trade ended — the panel used to just vanish */
+  useEffect(() => {
+    if (!g) { prevTradeRef.current = null; return; }
+    const prev = prevTradeRef.current;
+    prevTradeRef.current = { code: g.code, trade: g.trade };
+    if (!prev || prev.code !== g.code || !prev.trade || g.trade) return;
+    if (seat == null || prev.trade.from !== seat) return;
+    // newest log line wins — older trade outcomes may still sit in the tail
+    for (let i = g.log.length - 1; i >= Math.max(0, g.log.length - 4); i--) {
+      const m = g.log[i].m;
+      if (m.includes("accepted")) { setNote(`${pname(g, prev.trade.to)} accepted your trade. 🤝`); break; }
+      if (m.includes("declined the trade")) { setNote(`${pname(g, prev.trade.to)} declined your trade.`); break; }
+      if (m.includes("expired")) { setNote("Your trade offer expired unanswered."); break; }
+    }
+  }, [g, seat]);
+
+  /* a stale offer withdraws itself from the offerer's phone */
+  useEffect(() => {
+    if (!g || seat == null || !g.trade || g.trade.from !== seat) return;
+    if (!tradeExpired(g.trade)) return;
+    apply((d) => {
+      if (!d.trade || d.trade.from !== seat || !tradeExpired(d.trade)) return false;
+      d.trade = null;
+      say(d, "The trade offer expired before it was answered.");
+    });
+  }, [g, seat, now]);
 
   /* keep this phone's push subscription registered for the current game */
   useEffect(() => {
@@ -1739,6 +1784,20 @@ export default function App() {
             </button>
             <Btn tone="go" onClick={create} style={{ width: "100%" }}>Create game</Btn>
           </div>
+          <div style={{ marginTop: 14, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
+            <Eyebrow>Have a game code?</Eyebrow>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input value={joinCode} placeholder="e.g. K7QT"
+                onChange={(e) => setJoinCode(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8))}
+                style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`,
+                  borderRadius: 4, padding: "9px 10px", color: C.parch, fontFamily: dispFont, fontSize: 16, letterSpacing: ".2em" }} />
+              <Btn tone="go" disabled={joinCode.length < 4} onClick={() => loadByCode(joinCode)}>Join</Btn>
+            </div>
+            <div style={{ marginTop: 8, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
+              The four letters from any invite link — handy because iPhone links always open in Safari
+              instead of your Home Screen app.
+            </div>
+          </div>
           {note && <div style={{ marginTop: 16, color: "#f0b9a8", lineHeight: 1.5 }}>{note}</div>}
           <div style={{ marginTop: 26, color: C.parchDim, fontSize: 13, lineHeight: 1.65 }}>
             No accounts. You'll get one invite link to drop in the group chat — everyone taps it,
@@ -1801,6 +1860,13 @@ export default function App() {
           <Btn onClick={() => setSpectate(true)} style={{ width: "100%", marginTop: 14 }}>
             Just watch this game
           </Btn>
+          {inBrowserTab() && (
+            <div style={{ marginTop: 14, color: C.parchDim, fontSize: 12, lineHeight: 1.6, border: `1px solid ${C.line}`, borderRadius: 6, padding: 10 }}>
+              This opened in the browser — iPhone links always do. If Harbor is on your Home Screen,
+              you can open it there instead and enter code <b style={{ color: C.parch, letterSpacing: ".15em" }}>{g.code}</b> to
+              land in the app with your notifications working.
+            </div>
+          )}
           <div style={{ marginTop: 18, color: C.parchDim, fontSize: 13, lineHeight: 1.6 }}>
             Your phone remembers your seat for this game — you only do this once. If you switch phones,
             use rejoin. You can set a secret word on your seat (tap your name card in the game) so nobody
@@ -2038,7 +2104,7 @@ export default function App() {
             ))}
           </div>
         )}
-        {note && <div style={{ marginTop: 6, color: note.startsWith("You stole") ? C.gold : "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
+        {note && <div style={{ marginTop: 6, color: note.startsWith("You stole") || note.includes("accepted your trade") ? C.gold : "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
       </div>
 
       <div style={{ padding: "12px 14px" }}>
@@ -2077,6 +2143,7 @@ export default function App() {
             <Eyebrow>{pname(g, g.trade.from)} offers you a trade</Eyebrow>
             <div style={{ fontSize: 15, lineHeight: 1.6, marginBottom: 10 }}>
               You get <b>{fmtHand(g.trade.give)}</b> — you give <b>{fmtHand(g.trade.want)}</b>.
+              <span style={{ color: C.parchDim, fontSize: 13 }}> Offer expires in ~{Math.max(1, Math.ceil((TRADE_MS() - (now - (g.trade.at || 0))) / 60000))}m.</span>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <Btn tone="go" style={{ flex: 1 }} disabled={!RES.every((r) => hand[r] >= (g.trade.want[r] || 0))}
@@ -2158,6 +2225,7 @@ export default function App() {
                   <div style={{ border: `1px solid ${C.gold}`, borderRadius: 6, padding: 12 }}>
                     <div style={{ fontSize: 14, lineHeight: 1.5, marginBottom: 8 }}>
                       Waiting on {pname(g, g.trade.to)}: your {fmtHand(g.trade.give)} for their {fmtHand(g.trade.want)}.
+                      <span style={{ color: C.parchDim }}> Expires in ~{Math.max(1, Math.ceil((TRADE_MS() - (now - (g.trade.at || 0))) / 60000))}m.</span>
                     </div>
                     <Btn tone="warn" onClick={() => apply((d) => declineTrade(d, true))}>Withdraw the offer</Btn>
                   </div>
