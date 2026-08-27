@@ -287,9 +287,8 @@ check("no hand ever goes negative", phones.every((w) => !/>-\d/.test(H(w))));
     tap(me, pluses2.slice(0, 5).find((b) => !b.disabled)); await sleep(80);
     tap(me, pluses2[5]); await sleep(80);
     click(me, "Send the offer"); await sleep(200);
-    const expiredOk = await wait(me, (x) => !H(x).includes("Waiting on") && H(x).includes("expired"), 12000);
-    if (!expiredOk) console.log("DBG waiting:", H(me).includes("Waiting on"), "| expired:", H(me).includes("expired"), "| offerBtn:", !!btn(me, "Offer a trade"), "| txt:", (H(me).match(/Expires in[^<]*/) || [])[0]);
-    check("an unanswered trade offer expires on its own", expiredOk);
+    check("an unanswered trade offer expires on its own",
+      await wait(me, (x) => !H(x).includes("Waiting on") && H(x).includes("expired"), 12000));
   }
   if (!offered) check("a trade offer could be sent", false);
 }

@@ -45,7 +45,11 @@ function persist() {
       games: Object.fromEntries(games),
       subs: Object.fromEntries([...subs].map(([c, m]) => [c, Object.fromEntries(m)])),
     };
-    try { fs.writeFileSync(STORE, JSON.stringify(out)); } catch (e) { console.log("persist failed: " + e.message); }
+    // temp-then-rename: a crash mid-write must never leave torn JSON
+    try {
+      fs.writeFileSync(STORE + ".tmp", JSON.stringify(out));
+      fs.renameSync(STORE + ".tmp", STORE);
+    } catch (e) { console.log("persist failed: " + e.message); }
   }, 400);
 }
 
@@ -157,7 +161,9 @@ http.createServer((req, res) => {
       const g = games.get(code);
       if (!g) return json(res, 404, { error: "no such game" });
       const since = Number(u.searchParams.get("since"));
-      if (!Number.isInteger(since) || g.v > since) return json(res, 200, { v: g.v, blob: g.blob });
+      if (!u.searchParams.has("since") || !Number.isInteger(since) || g.v > since) {
+        return json(res, 200, { v: g.v, blob: g.blob });
+      }
       // nothing new: hold the request open until a PUT lands or we time out
       let set = waiters.get(code);
       if (!set) { set = new Set(); waiters.set(code, set); }

@@ -322,7 +322,6 @@ function newGame(code, names) {
     v: 1,
     code,
     seq: 0,
-    createdAt: Date.now(),
     hostTok: "",
     players: names.map((nm, i) => ({ name: nm, color: i, claimed: false, lock: "", tok: "" })),
     board,
@@ -396,6 +395,7 @@ function lobbyRemoveSeat(g, i) {
   if (g.phase !== "lobby" || g.players.length <= 2 || !g.players[i] || g.players[i].claimed) return false;
   g.players.splice(i, 1); g.hands.splice(i, 1); g.devHands.splice(i, 1);
   g.knights.splice(i, 1); g.roadLen.splice(i, 1); g.stats.splice(i, 1); g.seriesStats.splice(i, 1);
+  if (g.wins) g.wins.splice(i, 1);
   g.players.forEach((p, j) => { p.color = j; if (!p.claimed) p.name = `Player ${j + 1}`; });
   resetLobbyOrder(g);
   say(g, "A seat was removed.");
@@ -407,6 +407,7 @@ function lobbyAddSeat(g) {
   g.players.push({ name: `Player ${j + 1}`, color: j, claimed: false, lock: "", tok: "" });
   g.hands.push(emptyHand()); g.devHands.push([]); g.knights.push(0); g.roadLen.push(0);
   g.stats.push([0, 0, 0]); g.seriesStats.push([0, 0, 0]);
+  if (g.wins) g.wins.push(0);
   resetLobbyOrder(g);
   say(g, "A seat was added.");
   return g;
@@ -444,6 +445,7 @@ function startLobby(g, dropOpen) {
       if (!g.players[i].claimed) {
         g.players.splice(i, 1); g.hands.splice(i, 1); g.devHands.splice(i, 1);
         g.knights.splice(i, 1); g.roadLen.splice(i, 1); g.stats.splice(i, 1); g.seriesStats.splice(i, 1);
+        if (g.wins) g.wins.splice(i, 1);
       }
     }
     g.players.forEach((p, j) => { p.color = j; });
@@ -461,6 +463,7 @@ function startLobby(g, dropOpen) {
 
 /* ---------- setup phase ---------- */
 function placeSetupTown(g, v, p) {
+  if (g.phase !== "setupTown" || g.buildings[v]) return false;
   g.buildings[v] = { owner: p, type: "settlement" };
   g.lastSetupVertex = v;
   g.phase = "setupRoad";
@@ -476,6 +479,7 @@ function placeSetupTown(g, v, p) {
   return g;
 }
 function placeSetupRoad(g, e, p) {
+  if (g.phase !== "setupRoad" || g.roads[e] !== undefined) return false;
   g.roads[e] = p;
   g.setupIdx += 1;
   g.lastSetupVertex = null;
@@ -531,6 +535,7 @@ function distribute(g, roll) {
 }
 
 function rollDice(g) {
+  if (g.phase !== "roll") return false; // double-tap or rebase replay
   const d1 = 1 + Math.floor(Math.random() * 6);
   const d2 = 1 + Math.floor(Math.random() * 6);
   g.dice = [d1, d2];
@@ -590,6 +595,7 @@ function deputyDiscard(g, p, by) {
 }
 
 function moveRobber(g, hid, p) {
+  if (g.phase !== "robber") return false; // double-tap or rebase replay
   g.board.robber = hid;
   const h = hexById(g.board, hid);
   const victims = new Set();
@@ -613,6 +619,7 @@ function moveRobber(g, hid, p) {
 }
 
 function stealFrom(g, victim, p) {
+  if (!g.stealFrom.includes(victim)) return false; // already resolved
   const pool = [];
   RES.forEach((r) => { for (let i = 0; i < g.hands[victim][r]; i++) pool.push(r); });
   if (pool.length) {
@@ -677,6 +684,7 @@ function buyDev(g, p) {
 /* ---------- development cards ---------- */
 function playDev(g, p, idx, payload) {
   const card = g.devHands[p][idx];
+  if (!card || card.used || g.devPlayed) return false; // replay guard
   card.used = true;
   g.devPlayed = true;
   if (card.type === "knight") {
@@ -755,11 +763,12 @@ function bankTrade(g, p, give, want) {
 
 /* ---------- turn end / win ---------- */
 function endTurn(g) {
+  if (g.phase !== "main") return false; // double-tap or rebase replay
   const p = g.turn;
   if (scoreFor(g, p, true) >= winAt(g)) {
     g.winner = p;
     g.phase = "over";
-    say(g, `${pname(g, p)} reached 10 points and wins.`);
+    say(g, `${pname(g, p)} reached ${winAt(g)} points and wins.`);
     return g;
   }
   /* play proceeds in the drafted order, not seat order */
@@ -952,6 +961,7 @@ const apiUrl = (code) => new URL("/api/g/" + code, window.location.href).toStrin
    silently restore a game the server lost in a restart or redeploy. */
 const blobKey = (code) => "harbor-blob-" + code;
 function cacheBlob(code, v, blob) {
+  if (!Number.isInteger(v) || typeof blob !== "string" || !blob) return;
   try {
     const cur = JSON.parse(window.localStorage.getItem(blobKey(code)) || "null");
     if (!cur || v > cur.v) window.localStorage.setItem(blobKey(code), JSON.stringify({ v, blob }));
@@ -966,6 +976,7 @@ async function serverGet(code) {
     const r = await fetch(apiUrl(code));
     if (!r.ok) return null;
     const j = await r.json();
+    if (typeof j.blob !== "string" || !j.blob) return null; // e.g. {unchanged:true}
     cacheBlob(code, j.v, j.blob);
     return j;
   } catch { return null; }
@@ -1373,7 +1384,7 @@ export default function App() {
   const [booting, setBooting] = useState(true);
   const [lobby, setLobby] = useState(null);
   const [pushReady, setPushReady] = useState(false);
-  const [now, setNow] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
   const [pending, setPending] = useState(null);
   const [gains, setGains] = useState(null);
   const prevRollRef = useRef(null);
@@ -1583,14 +1594,27 @@ export default function App() {
     return () => { dead = true; clearInterval(tick); };
   }, [g && g.code]);
 
-  /* run a mutation, push it, and rebase-retry if someone else moved first */
+  /* run a mutation, push it, and rebase-retry if someone else moved first.
+     One at a time: a double-tap during the network round trip must not
+     replay the action onto the already-updated state. */
+  const applyBusy = useRef(false);
   const apply = async (fn) => {
-    let latest = gRef.current;
-    if (latest && clientOutdated(latest)) {
-      setNote("A newer Harbor is running this game — refresh this page before making a move.");
-      return false;
+    if (applyBusy.current) return false;
+    applyBusy.current = true;
+    try {
+      return await applyInner(fn);
+    } finally {
+      applyBusy.current = false;
     }
+  };
+  const applyInner = async (fn) => {
+    let latest = gRef.current;
     for (let attempt = 0; attempt < 3; attempt++) {
+      if (latest && clientOutdated(latest)) {
+        // re-checked every attempt: a rebase can pull in newer-build state
+        setNote("A newer Harbor is running this game — refresh this page before making a move.");
+        return false;
+      }
       const d = clone(latest);
       let out;
       try { out = fn(d); } catch { out = false; }
@@ -1601,7 +1625,7 @@ export default function App() {
       const inSetup = d.phase === "setupTown" || d.phase === "setupRoad";
       if (!inSetup && d.phase !== "over" && scoreFor(d, d.turn, true) >= winAt(d)) {
         d.winner = d.turn; d.phase = "over";
-        say(d, `${pname(d, d.turn)} reached 10 points and wins.`);
+        say(d, `${pname(d, d.turn)} reached ${winAt(d)} points and wins.`);
       }
       d.seq = (d.seq || 0) + 1;
       const r = await serverPut(d, seat);
@@ -1682,9 +1706,14 @@ export default function App() {
       if (r.ok || !r.conflict) break; // conflict means the code is taken — reroll
     }
     if (!r || !r.ok) { setNote("Couldn't start the rematch — try again in a moment."); return; }
-    // point the finished game at the new one so everyone else can follow
-    await apply((d) => { d.rematch = fresh.code; say(d, `${pname(d, seat)} called a rematch.`); });
-    await joinRematch(fresh.code);
+    // point the finished game at the new one so everyone else can follow;
+    // if someone else's rematch pointer landed first, follow theirs instead
+    const ok = await apply((d) => {
+      if (d.rematch) return false;
+      d.rematch = fresh.code;
+      say(d, `${pname(d, seat)} called a rematch.`);
+    });
+    await joinRematch(ok ? fresh.code : (gRef.current.rematch || fresh.code));
   };
 
   /* ---- claim a seat ---- */
