@@ -156,6 +156,11 @@ check("setup completes into the roll phase",
   const roller = phones.find((w) => btn(w, "Roll the dice"));
   check("the draft's first player also rolls first",
     !!roller && (H(roller).match(/Your turn, ([A-Za-z]+)/) || [])[1] === half[0]);
+  if (roller) {
+    const h = H(roller);
+    check("your hand sits above the action buttons",
+      h.indexOf("Your hand — ") > -1 && h.indexOf("Your hand — ") < h.indexOf(">Roll the dice<"));
+  }
 }
 
 // ---- turns: each phone acts on its own, server carries the moves ----
@@ -264,6 +269,8 @@ check("no hand ever goes negative", phones.every((w) => !/>-\d/.test(H(w))));
     const pluses = [...me.document.querySelectorAll("button")].filter((b) => b.textContent === "+");
     const givePlus = pluses.slice(0, 5).find((b) => !b.disabled);
     if (!givePlus) { click(me, "×"); click(me, "End turn"); await sleep(200); continue; }
+    // the sheet shows the hand a second time so nobody has to close it to look
+    check("your hand is visible inside the trade sheet", (H(me).match(/Your hand — /g) || []).length >= 2);
     tap(me, givePlus); await sleep(80);
     tap(me, pluses[5]); await sleep(80); // want: first resource, always steppable
     click(me, "Send the offer"); await sleep(200);
@@ -325,6 +332,13 @@ check("recent rolls strip shows on a synced phone", H(phones[1]).includes("LAST 
   click(phones[1], "Rolls");
   const opened = await wait(phones[1], (x) => H(x).includes("Hot and cold"));
   check("rolls sheet shows the hot and cold board", opened && / — \d+ so far/.test(H(phones[1])));
+  click(phones[1], "×");
+  await sleep(150);
+  // tapping an opponent's score card opens their public record
+  const oppCard = phones[1].document.querySelector('[title^="What "]');
+  tap(phones[1], oppCard);
+  const peeked = await wait(phones[1], (x) => H(x).includes("points showing"));
+  check("an opponent's card shows their played dev cards", peeked && H(phones[1]).includes("Dev cards played"));
   click(phones[1], "×");
   await sleep(120);
 }

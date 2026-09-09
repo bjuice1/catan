@@ -1198,6 +1198,24 @@ function Chip({ res, n }) {
     </span>
   );
 }
+function HandStrip({ hand }) {
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <Eyebrow>Your hand — {handTotal(hand)} cards</Eyebrow>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {RES.map((r) => <Chip key={r} res={r} n={hand[r]} />)}
+      </div>
+    </div>
+  );
+}
+
+/* played dev cards are public information, like face-up cards on the table */
+function playedSummary(g, i) {
+  const counts = {};
+  g.devHands[i].filter((c) => c.used).forEach((c) => { counts[c.type] = (counts[c.type] || 0) + 1; });
+  return Object.entries(counts).map(([t, n]) => `${DEV_LABEL[t]}${n > 1 ? ` ×${n}` : ""}`).join(" · ");
+}
+
 function ResStepper({ value, max, onChange }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -2061,8 +2079,8 @@ export default function App() {
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
           {g.players.map((p, i) => (
-            <div key={i} title={i === actor ? "Edit your name" : undefined}
-              onClick={i === actor ? () => setModal({ k: "rename" }) : undefined}
+            <div key={i} title={i === actor ? "Edit your name" : `What ${p.name} has played`}
+              onClick={i === actor ? () => setModal({ k: "rename" }) : () => setModal({ k: "peek", who: i })}
               style={{ flex: 1, border: `1px solid ${i === g.turn && g.winner == null ? C.gold : C.line}`,
               background: i === g.turn && g.winner == null ? "rgba(224,164,55,.09)" : "rgba(255,255,255,.02)",
               borderRadius: 5, padding: "6px 5px", textAlign: "center", cursor: i === actor ? "pointer" : "default" }}>
@@ -2135,6 +2153,21 @@ export default function App() {
         )}
         {note && <div style={{ marginTop: 6, color: note.startsWith("You stole") || note.includes("accepted your trade") ? C.gold : "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
       </div>
+
+      {/* your hand rides directly under the board — the thing you check most */}
+      {actor != null && (
+        <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.line}`, background: "rgba(255,255,255,.02)" }}>
+          <Eyebrow>Your hand — {handTotal(hand)} cards</Eyebrow>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {RES.map((r) => <Chip key={r} res={r} n={hand[r]} />)}
+          </div>
+          {g.devHands[actor].filter((c) => !c.used).length > 0 && (
+            <div style={{ marginTop: 8, color: C.parchDim, fontSize: 13 }}>
+              Cards: {g.devHands[actor].filter((c) => !c.used).map((c) => DEV_LABEL[c.type]).join(", ")}
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{ padding: "12px 14px" }}>
         {g.winner != null && (
@@ -2270,7 +2303,14 @@ export default function App() {
               </div>
             )}
 
-            {tab === "cards" && <DevList g={g} actor={actor} devPlayable={devPlayable} apply={apply} setModal={setModal} />}
+            {tab === "cards" && (
+              <>
+                <DevList g={g} actor={actor} devPlayable={devPlayable} apply={apply} setModal={setModal} />
+                <div style={{ marginTop: 10, color: C.parchDim, fontSize: 13, lineHeight: 1.5 }}>
+                  You've played: {playedSummary(g, actor) || "nothing yet"}
+                </div>
+              </>
+            )}
 
             <Btn tone="warn" style={{ width: "100%", marginTop: 14 }}
               onClick={() => apply((d) => endTurn(d))}>End turn</Btn>
@@ -2284,17 +2324,6 @@ export default function App() {
           </div>
         )}
 
-        {actor != null && <div style={{ marginTop: 18, borderTop: `1px solid ${C.line}`, paddingTop: 12 }}>
-          <Eyebrow>Your hand — {handTotal(hand)} cards</Eyebrow>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {RES.map((r) => <Chip key={r} res={r} n={hand[r]} />)}
-          </div>
-          {g.devHands[actor].filter((c) => !c.used).length > 0 && (
-            <div style={{ marginTop: 8, color: C.parchDim, fontSize: 13 }}>
-              Cards: {g.devHands[actor].filter((c) => !c.used).map((c) => DEV_LABEL[c.type]).join(", ")}
-            </div>
-          )}
-        </div>}
       </div>
 
       {modal && <Modals modal={modal} setModal={setModal} g={g} actor={actor} hand={hand} apply={apply} owed={owed} setNote={setNote} />}
@@ -2463,6 +2492,36 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
     );
   }
 
+  if (modal.k === "peek") {
+    const who = modal.who;
+    const p = g.players[who];
+    const rowLine = (label, value) => (
+      <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: `1px solid ${C.line}` }}>
+        <span style={{ color: C.parchDim, fontSize: 13 }}>{label}</span>
+        <span style={{ fontSize: 14, textAlign: "right" }}>{value}</span>
+      </div>
+    );
+    return (
+      <Sheet title={p.name} onClose={close}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <span style={{ width: 12, height: 12, borderRadius: 3, background: PC[p.color].hex }} />
+          <span style={{ fontFamily: dispFont, fontSize: 16, letterSpacing: ".08em" }}>
+            {scoreFor(g, who, false)} points showing
+          </span>
+        </div>
+        {rowLine("Dev cards played", playedSummary(g, who) || "none yet")}
+        {rowLine("Knights on the table", g.knights[who])}
+        {rowLine("Longest road", `${g.roadLen[who]} segment${g.roadLen[who] === 1 ? "" : "s"}${g.longestRoad === who ? " · holds Longest Road" : ""}`)}
+        {rowLine("Cards in hand", `${handTotal(g.hands[who])} resource · ${g.devHands[who].filter((c) => !c.used).length} dev`)}
+        {(g.wins?.[who] || 0) > 0 && rowLine("Series wins", g.wins[who])}
+        <div style={{ marginTop: 12, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
+          Everything here is table-visible information — played cards, counts, and public score.
+          Hidden victory points stay hidden until they win with them.
+        </div>
+      </Sheet>
+    );
+  }
+
   if (modal.k === "discard") {
     const total = handTotal(pick);
     return (
@@ -2500,10 +2559,18 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
     return (
       <Sheet title="Trade with the bank" onClose={close}
         footer={<Btn tone="go" style={{ flex: 1 }} disabled={!bankGive || !bankWant || bankGive === bankWant}
-          onClick={() => { apply((d) => bankTrade(d, actor, bankGive, bankWant)); close(); }}>
+          onClick={async () => {
+            // stay open so several trades can be chained without re-opening
+            const ok = await apply((d) => bankTrade(d, actor, bankGive, bankWant));
+            if (ok) { setBankGive(null); setBankWant(null); }
+          }}>
           {bankGive && bankWant ? `Give ${rate} ${RES_LABEL[bankGive].toLowerCase()}` : "Pick both sides"}</Btn>}>
+        <HandStrip hand={hand} />
         {row("Give", bankGive, setBankGive, (r) => hand[r] >= tradeRate(g, actor, r), true)}
         {row("Receive 1 of", bankWant, setBankWant, (r) => g.bank[r] > 0, false)}
+        <div style={{ color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
+          The sheet stays open after a trade — chain as many as you like, then close it.
+        </div>
       </Sheet>
     );
   }
@@ -2516,6 +2583,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         footer={<Btn tone="go" style={{ flex: 1 }} disabled={!ok}
           onClick={() => { apply((d) => offerTrade(d, actor, partner, give, want)); close(); }}>
           {ok ? `Send the offer to ${pname(g, partner)}` : "Fill in both sides"}</Btn>}>
+        <HandStrip hand={hand} />
         <Eyebrow>To</Eyebrow>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
           {g.players.map((p, i) => i === actor ? null : (
