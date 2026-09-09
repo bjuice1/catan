@@ -357,6 +357,7 @@ function newGame(code, names) {
     winner: null,
     rematch: "",
     wins: names.map(() => 0), // series tally, carried across rematches
+    history: [], // one {w, o} per finished game: winner seat + draft order
     gameNo: 1,
     log: [{ t: Date.now(), m: "Game created. Place your first town." }],
   };
@@ -422,6 +423,10 @@ function makeRematch(prev, code) {
     g.players[i].lock = p.lock;
   });
   g.wins = prev.players.map((_, i) => (prev.wins?.[i] || 0) + (prev.winner === i ? 1 : 0));
+  g.history = [
+    ...(prev.history || []),
+    { w: prev.winner, o: prev.setupOrder.slice(0, prev.players.length).join("") },
+  ].slice(-40);
   g.gameNo = (prev.gameNo || 1) + 1;
   g.rules = { ...(prev.rules || { win: 10, friendly: false }) };
   g.seriesStats = prev.players.map((_, i) =>
@@ -433,6 +438,16 @@ function makeRematch(prev, code) {
 
 /* standings including the game on screen, which isn't in wins[] until the
    next rematch is created */
+const ORDINAL = ["1st", "2nd", "3rd", "4th"];
+/* the finished-game record including the game on screen, which isn't folded
+   into history until the next rematch is created */
+function seriesHistory(g) {
+  const h = [...(g.history || [])];
+  if (g.winner != null) h.push({ w: g.winner, o: g.setupOrder.slice(0, g.players.length).join("") });
+  return h;
+}
+const draftPos = (entry, seat) => entry.o.indexOf(String(seat)); // seats are single digits
+
 const standings = (g) => g.players
   .map((p, i) => ({ i, name: p.name, w: (g.wins?.[i] || 0) + (g.winner === i ? 1 : 0) }))
   .sort((a, b) => b.w - a.w || a.i - b.i);
@@ -850,6 +865,7 @@ function pack(g) {
     w: g.winner == null ? -1 : g.winner,
     rm: g.rematch || "",
     ws: (g.wins || []).join(","),
+    hi: (g.history || []).map((h) => h.w + ":" + h.o),
     gn: g.gameNo || 1,
     av: Math.max(g.appV || 0, APP_V),
     ru: [g.rules?.win || 10, g.rules?.friendly ? 1 : 0],
@@ -921,6 +937,7 @@ function unpack(o) {
     winner: o.w < 0 ? null : o.w,
     rematch: o.rm || "",
     wins: o.ws ? o.ws.split(",").map(Number) : o.n.map(() => 0),
+    history: (o.hi || []).map((s) => { const [w, ord] = s.split(":"); return { w: +w, o: ord }; }),
     gameNo: o.gn || 1,
     appV: o.av || 0,
     rules: o.ru ? { win: o.ru[0] || 10, friendly: !!o.ru[1] } : { win: 10, friendly: false },
@@ -2173,6 +2190,9 @@ export default function App() {
         {g.winner != null && (
           <div style={{ border: `1px solid ${C.gold}`, borderRadius: 7, padding: 14, marginBottom: 12, background: "rgba(224,164,55,.1)" }}>
             <div style={{ fontFamily: dispFont, fontSize: 22, letterSpacing: ".12em" }}>🎆 {pname(g, g.winner).toUpperCase()} WINS 🎆</div>
+            <div style={{ marginTop: 4, color: C.parchDim, fontSize: 13 }}>
+              …after drafting {ORDINAL[draftPos({ o: g.setupOrder.slice(0, g.players.length).join("") }, g.winner)]} this game.
+            </div>
             <div style={{ marginTop: 10, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
               <Eyebrow>Series — {g.gameNo} game{g.gameNo === 1 ? "" : "s"} in</Eyebrow>
               {standings(g).map((s, rank) => (
@@ -2398,6 +2418,41 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
                 </div>
               );
             })}
+            {(() => {
+              const hist = seriesHistory(g);
+              if (!hist.length) return null;
+              const n = g.players.length;
+              const posW = Array.from({ length: n }, (_, p) => hist.filter((e) => draftPos(e, e.w) === p).length);
+              const recent = hist.slice(-12);
+              return (
+                <div style={{ marginTop: 10, borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
+                  <Eyebrow>Draft-order record — does going first matter?</Eyebrow>
+                  <div style={{ fontSize: 12, color: C.parch, marginBottom: 8 }}>
+                    {posW.map((w, p) => `${ORDINAL[p]} drafted: ${w} of ${hist.length}`).join(" · ")}
+                  </div>
+                  {g.players.map((pl, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0" }}>
+                      <span style={{ width: 9, height: 9, borderRadius: 2, background: PC[pl.color].hex }} />
+                      <span style={{ flex: 1, fontSize: 12, color: C.parchDim }}>{pl.name}</span>
+                      <span style={{ display: "flex", gap: 4 }}>
+                        {recent.map((e, k) => {
+                          const won = e.w === i;
+                          return (
+                            <span key={k} style={{ width: 20, height: 20, display: "inline-flex", alignItems: "center",
+                              justifyContent: "center", borderRadius: 3, fontFamily: dispFont, fontSize: 11,
+                              border: `1px solid ${won ? C.gold : C.line}`, color: won ? C.gold : C.parchDim,
+                              background: won ? "rgba(224,164,55,.12)" : "transparent" }}>{draftPos(e, i) + 1}</span>
+                          );
+                        })}
+                      </span>
+                    </div>
+                  ))}
+                  <div style={{ marginTop: 6, fontSize: 11, color: C.parchDim }}>
+                    One box per game, oldest left: the number is where they drafted; gold means they won it.
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
         <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>

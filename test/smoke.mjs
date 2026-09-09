@@ -632,6 +632,8 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     click(otherW, "Log");
     await sleep(200);
     check("series stats show in the log sheet", /gained \d+ · stolen \d+ · sevens \d+/.test(H(otherW)));
+    check("draft-order record tracks who won from which position",
+      H(otherW).includes("Draft-order record") && /1st drafted: \d+ of 1 · 2nd drafted: \d+ of 1/.test(H(otherW)));
     click(otherW, "×");
   }
 }
