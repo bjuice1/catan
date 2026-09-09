@@ -224,6 +224,7 @@ check("every phone still shows a coherent board", phones.every((w) => H(w).inclu
 // the negative-wheat bug: a discard rebased onto a changed hand once pushed
 // a resource below zero — no phone may ever show a negative count
 check("no hand ever goes negative", phones.every((w) => !/>-\d/.test(H(w))));
+check("Shai-Hulud rises from the desert on every phone", phones.every((w) => H(w).includes('class="worm"')));
 
 // ---- trade offers travel to the target's phone ----
 {

@@ -1,0 +1,41 @@
+import { JSDOM } from "jsdom";
+import { readFileSync, writeFileSync, mkdtempSync } from "fs";
+import { spawn } from "child_process";
+import { tmpdir } from "os";
+import { join } from "path";
+const code_js = readFileSync("bundle.js", "utf8");
+const PORT = 34877, BASE = `http://127.0.0.1:${PORT}/`;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const srv = spawn(process.execPath, ["server.js"], { env: { ...process.env, PORT: String(PORT), HARBOR_DATA: mkdtempSync(join(tmpdir(), "hd-")) } });
+for (let i = 0; i < 50; i++) { await sleep(100); try { if ((await (await fetch(BASE + "health")).text()) === "ok") break; } catch {} }
+function boot(url) {
+  const dom = new JSDOM('<!doctype html><html><body><div id=root></div></body></html>', { url, runScripts: "outside-only", pretendToBeVisual: true });
+  const w = dom.window;
+  Object.assign(w, { CompressionStream: globalThis.CompressionStream, DecompressionStream: globalThis.DecompressionStream, Response: globalThis.Response, TextEncoder: globalThis.TextEncoder, TextDecoder: globalThis.TextDecoder });
+  w.fetch = (u, o) => globalThis.fetch(u, o);
+  w.HARBOR_POLL_MS = 120;
+  w.btoa = (s) => Buffer.from(s, "binary").toString("base64");
+  w.atob = (s) => Buffer.from(s, "base64").toString("binary");
+  w.navigator.clipboard = { writeText: async () => {} };
+  w.eval(code_js); return w;
+}
+const H = (w) => w.document.getElementById("root").innerHTML;
+const btn = (w, t) => [...w.document.querySelectorAll("button")].find((x) => x.textContent.trim().toLowerCase().includes(t.toLowerCase()));
+const tap = (w, el) => el.dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
+const setInput = (w, el, v) => { Object.getOwnPropertyDescriptor(w.HTMLInputElement.prototype, "value").set.call(el, v); el.dispatchEvent(new w.Event("input", { bubbles: true })); };
+const wait = async (w, fn, ms = 6000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (fn(w)) return true; await sleep(60); } return false; };
+const A = boot(BASE);
+await wait(A, (x) => x.document.querySelectorAll("input").length >= 1);
+setInput(A, A.document.querySelector("input"), "Win"); await sleep(80);
+tap(A, btn(A, "2")); await sleep(80);
+tap(A, btn(A, "Create game"));
+await wait(A, (x) => H(x).includes("aboard"));
+const code = (H(A).match(/Game ([A-Z0-9]{4})/) || [])[1];
+const B = boot(BASE + "#g=" + code);
+await wait(B, (x) => H(x).includes("pick your seat"));
+setInput(B, B.document.querySelector("input"), "Two"); await sleep(80);
+tap(B, [...B.document.querySelectorAll("button")].find((b) => b.textContent.includes("Take this seat") && !b.disabled));
+await wait(A, (x) => H(x).includes("<svg"));
+writeFileSync(process.argv[2] || "board.svg", A.document.querySelector("svg").outerHTML.replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" '));
+console.log("svg written");
+srv.kill(); process.exit(0);

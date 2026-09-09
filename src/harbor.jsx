@@ -1140,7 +1140,17 @@ async function decodeGame(str) {
 /* ============================================================
    UI
    ============================================================ */
-const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;500;600&family=Spectral:ital,wght@0,400;0,600;1,400&display=swap');`;
+const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@300;500;600&family=Spectral:ital,wght@0,400;0,600;1,400&display=swap');
+@keyframes hbSlam{0%{transform:scale(2.6);opacity:0}55%{transform:scale(.92);opacity:1}75%{transform:scale(1.08)}100%{transform:scale(1)}}
+@keyframes hbRise{0%{transform:translateY(3px) scale(.2);opacity:0}60%{transform:translateY(-.8px) scale(1.12);opacity:1}100%{transform:translateY(0) scale(1)}}
+@keyframes hbThud{0%{transform:translateY(-14px) scale(1.5);opacity:0}55%{transform:translateY(1.4px) scale(.9);opacity:1}80%{transform:translateY(-.7px) scale(1.04)}100%{transform:translateY(0) scale(1)}}
+@keyframes hbShake{0%,100%{transform:translate(0,0)}20%{transform:translate(-1.5px,1px)}40%{transform:translate(1.5px,-1px)}60%{transform:translate(-1px,-1px)}80%{transform:translate(1px,1px)}}
+@keyframes hbDiePop{0%{transform:rotate(-14deg) scale(.4)}65%{transform:rotate(6deg) scale(1.15)}100%{transform:rotate(0) scale(1)}}
+.hb-road{animation:hbSlam .42s cubic-bezier(.2,1.4,.4,1);transform-box:fill-box;transform-origin:center}
+.hb-build{animation:hbRise .5s cubic-bezier(.2,1.4,.4,1);transform-box:fill-box;transform-origin:50% 100%}
+.hb-robber{animation:hbThud .55s cubic-bezier(.3,1.3,.5,1)}
+.hb-shake{animation:hbShake .4s ease-out}
+.hb-die{animation:hbDiePop .45s cubic-bezier(.2,1.4,.4,1)}`;
 const dispFont = "'Oswald', 'Helvetica Neue', sans-serif";
 const bodyFont = "'Spectral', Georgia, serif";
 
@@ -1191,7 +1201,7 @@ function Fireworks({ letter }) {
 function Die({ n, hot }) {
   const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
   return (
-    <span style={{ display: "inline-grid", gridTemplate: "repeat(3,1fr)/repeat(3,1fr)", width: 28, height: 28,
+    <span className="hb-die" style={{ display: "inline-grid", gridTemplate: "repeat(3,1fr)/repeat(3,1fr)", width: 28, height: 28,
       background: "#f2ead6", borderRadius: 6, padding: 4, boxSizing: "border-box", gap: 1,
       border: "1px solid rgba(6,20,25,.45)", boxShadow: "0 1px 2px rgba(0,0,0,.4)" }}>
       {Array.from({ length: 9 }, (_, i) => (
@@ -1284,6 +1294,39 @@ function BuildRow({ label, cost, note, disabled, active, onClick }) {
   );
 }
 
+/* Shai-Hulud rises from the desert. Bless the Maker and His water. */
+function Worm({ cx, cy }) {
+  const segs = [
+    { x: -2.7, y: 4.0, r: 2.1 },
+    { x: -2.3, y: 2.2, r: 2.0 },
+    { x: -1.3, y: 0.7, r: 1.9 },
+    { x: 0.1, y: -0.5, r: 1.85 },
+  ];
+  const hx = cx + 1.7, hy = cy - 1.9, hr = 2.5;
+  const teeth = Array.from({ length: 10 }, (_, i) => {
+    const a = (Math.PI * 2 * i) / 10;
+    return {
+      x1: hx + Math.cos(a) * 1.55, y1: hy + Math.sin(a) * 1.55,
+      x2: hx + Math.cos(a) * 0.55, y2: hy + Math.sin(a) * 0.55,
+    };
+  });
+  return (
+    <g className="worm" style={{ pointerEvents: "none" }}>
+      <ellipse cx={cx - 2.7} cy={cy + 4.9} rx="3.1" ry="0.9" fill="rgba(96,74,40,.45)" />
+      {segs.map((s, i) => (
+        <circle key={i} cx={cx + s.x} cy={cy + s.y} r={s.r}
+          fill={i % 2 ? "#c9b37e" : "#bfa76f"} stroke="rgba(62,46,22,.6)" strokeWidth="0.3" />
+      ))}
+      <circle cx={hx} cy={hy} r={hr} fill="#c9b37e" stroke="rgba(62,46,22,.7)" strokeWidth="0.35" />
+      <circle cx={hx} cy={hy} r="1.7" fill="#231709" />
+      {teeth.map((t, i) => (
+        <line key={i} x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2} stroke="#e8d9ae" strokeWidth="0.26" />
+      ))}
+      <circle cx={hx} cy={hy} r="0.45" fill="#0d0803" />
+    </g>
+  );
+}
+
 /* board is unchanged from the shared-storage build */
 function Board({ g, sel, onPick, pending }) {
   const b = g.board;
@@ -1324,7 +1367,9 @@ function Board({ g, sel, onPick, pending }) {
         return (
           <g key={h.id}>
             <polygon points={pts} fill={HEX_FILL[h.terrain]} stroke="rgba(6,20,25,.55)" strokeWidth="0.6" />
-            {b.robber !== h.id && (
+            {h.terrain === "desert" ? (
+              <Worm cx={h.cx} cy={h.cy} />
+            ) : b.robber !== h.id && (
               <text x={h.cx} y={h.cy - 4.9} textAnchor="middle" fontSize="4"
                 style={{ pointerEvents: "none" }}>{TERRAIN_ICON[h.terrain]}</text>
             )}
@@ -1338,9 +1383,14 @@ function Board({ g, sel, onPick, pending }) {
               </g>
             )}
             {b.robber === h.id && (
-              <g>
-                <ellipse cx={h.cx} cy={h.cy - 5.6} rx="2.2" ry="2.9" fill="#141414" stroke="#000" strokeWidth="0.3" />
-                <circle cx={h.cx} cy={h.cy - 8.3} r="1.5" fill="#141414" />
+              /* outer g positions, inner g animates — a CSS transform on one
+                 element would stomp the positional attribute. On the desert
+                 he steps aside; nobody stands on the worm. */
+              <g transform={h.terrain === "desert" ? `translate(${h.cx - 3.6} ${h.cy + 1.2})` : `translate(${h.cx} ${h.cy})`}>
+                <g className="hb-robber">
+                  <ellipse cx="0" cy="-5.6" rx="2.2" ry="2.9" fill="#141414" stroke="#000" strokeWidth="0.3" />
+                  <circle cx="0" cy="-8.3" r="1.5" fill="#141414" />
+                </g>
               </g>
             )}
             {target && <polygon points={pts}
@@ -1351,19 +1401,21 @@ function Board({ g, sel, onPick, pending }) {
           </g>
         );
       })}
+      {/* stable keys mean existing pieces never remount — only a NEW piece
+          runs its mount animation (the slam / the build) */}
       {Object.entries(g.roads).map(([e, owner]) => {
         const r = roadPath(e);
-        return <line key={e} x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={PC[g.players[owner].color].hex}
+        return <line key={e} className="hb-road" x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={PC[g.players[owner].color].hex}
           strokeWidth="2.1" strokeLinecap="round" />;
       })}
       {Object.entries(g.buildings).map(([v, bl]) => {
         const p = GEO.vertexPos[v];
         const col = PC[g.players[bl.owner].color].hex;
         return bl.type === "settlement" ? (
-          <polygon key={v} points={`${p.x - 2},${p.y + 2} ${p.x - 2},${p.y - 0.6} ${p.x},${p.y - 2.6} ${p.x + 2},${p.y - 0.6} ${p.x + 2},${p.y + 2}`}
+          <polygon key={v} className="hb-build" points={`${p.x - 2},${p.y + 2} ${p.x - 2},${p.y - 0.6} ${p.x},${p.y - 2.6} ${p.x + 2},${p.y - 0.6} ${p.x + 2},${p.y + 2}`}
             fill={col} stroke="rgba(6,20,25,.75)" strokeWidth="0.45" />
         ) : (
-          <g key={v}>
+          <g key={v + bl.type} className="hb-build">
             <rect x={p.x - 2.8} y={p.y - 1.2} width="5.6" height="3.4" fill={col} stroke="rgba(6,20,25,.75)" strokeWidth="0.45" />
             <polygon points={`${p.x - 2.8},${p.y - 1.2} ${p.x},${p.y - 3.6} ${p.x + 2.8},${p.y - 1.2}`}
               fill={col} stroke="rgba(6,20,25,.75)" strokeWidth="0.45" />
@@ -1421,6 +1473,21 @@ export default function App() {
   const [pushReady, setPushReady] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [pending, setPending] = useState(null);
+  const [shaking, setShaking] = useState(false);
+  const pieceCount = useRef(0);
+
+  /* the board shakes when any piece lands — yours or theirs */
+  useEffect(() => {
+    if (!g) { pieceCount.current = 0; return; }
+    const n = Object.keys(g.roads).length + Object.keys(g.buildings).length;
+    const grew = pieceCount.current > 0 && n > pieceCount.current;
+    pieceCount.current = n;
+    if (grew) {
+      setShaking(true);
+      const t = setTimeout(() => setShaking(false), 450);
+      return () => clearTimeout(t);
+    }
+  }, [g]);
   const [gains, setGains] = useState(null);
   const prevRollRef = useRef(null);
   const prevTradeRef = useRef(null);
@@ -2127,7 +2194,9 @@ export default function App() {
       )}
 
       <div style={{ position: "relative" }}>
+        <div className={shaking ? "hb-shake" : undefined}>
         <Board g={g} sel={effSel} onPick={onPick} pending={pendingValid ? pending : null} />
+      </div>
         {gains && (
           <div key={gains.key} style={{ position: "absolute", top: "38%", left: 0, right: 0, textAlign: "center",
             pointerEvents: "none", fontFamily: dispFont, fontSize: 30, color: C.gold,
@@ -2152,8 +2221,8 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {g.dice && (
             <span style={{ display: "inline-flex", alignItems: "center", gap: 5, flexShrink: 0 }}>
-              <Die n={g.dice[0]} hot={g.dice[0] + g.dice[1] === 7} />
-              <Die n={g.dice[1]} hot={g.dice[0] + g.dice[1] === 7} />
+              <Die key={"d0-" + g.rolls.length} n={g.dice[0]} hot={g.dice[0] + g.dice[1] === 7} />
+              <Die key={"d1-" + g.rolls.length} n={g.dice[1]} hot={g.dice[0] + g.dice[1] === 7} />
               <span style={{ fontFamily: dispFont, fontSize: 24, marginLeft: 3,
                 color: g.dice[0] + g.dice[1] === 7 ? C.rust : C.gold }}>{g.dice[0] + g.dice[1]}</span>
             </span>
