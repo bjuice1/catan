@@ -214,7 +214,11 @@ for (let t = 0; t < 35; t++) {
     if (v) { tap(stealer, v); await sleep(240); }
   }
   const ender = phones.find((w) => btn(w, "End turn"));
-  if (ender && !stripEnd) stripEnd = (H(ender).match(/>End turn</g) || []).length >= 2;
+  // exactly one End turn, and it lives in the dice strip (before the tabs)
+  if (ender && !stripEnd) {
+    const h = H(ender);
+    stripEnd = (h.match(/>End turn</g) || []).length === 1 && h.indexOf(">End turn<") < h.indexOf(">build<");
+  }
   if (ender) { click(ender, "End turn"); passes++; await sleep(200); }
 }
 check("turns advance across phones", passes > 15);

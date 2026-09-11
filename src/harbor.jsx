@@ -2443,9 +2443,6 @@ export default function App() {
                 </div>
               </>
             )}
-
-            <Btn tone="warn" style={{ width: "100%", marginTop: 14 }}
-              onClick={() => apply((d) => endTurn(d))}>End turn</Btn>
           </>
         )}
 
