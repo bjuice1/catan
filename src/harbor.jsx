@@ -26,7 +26,20 @@ const PC = [
   { name: "Blue", hex: "#3b7fb0" },
   { name: "Orange", hex: "#dd8a2a" },
   { name: "Bone", hex: "#e9e4d6" },
+  { name: "Jade", hex: "#4f9d78" },
+  { name: "Violet", hex: "#8e6bb5" },
+  { name: "Teal", hex: "#3aa8a0" },
+  { name: "Rose", hex: "#c96b8e" },
 ];
+/* the multicolour set: every piece a different colour, chosen by piece id */
+const MULTI = 99;
+const MULTI_SET = ["#c94f38", "#3c78b4", "#e0a437", "#69a05a", "#8e6bb5", "#3aa8a0"];
+const swatchBg = (c) =>
+  c === MULTI ? "linear-gradient(135deg,#c94f38,#e0a437,#69a05a,#3c78b4,#8e6bb5)" : (PC[c] || PC[0]).hex;
+const pieceFill = (c, key) =>
+  c === MULTI
+    ? MULTI_SET[[...String(key)].reduce((a, ch) => a + ch.charCodeAt(0), 0) % MULTI_SET.length]
+    : (PC[c] || PC[0]).hex;
 const C = {
   sea: "#0e2a35", seaDeep: "#071c25", ink: "#061419",
   parch: "#efe6d2", parchDim: "#bfb69f", line: "#1e4a5a",
@@ -380,6 +393,28 @@ const say = (g, m) => { g.log.push({ t: Date.now(), m }); if (g.log.length > 120
 const pname = (g, i) => g.players[i]?.name ?? "?";
 
 /* ---------- lobby ---------- */
+/* keep every claimed player's chosen colour; open seats and duplicates get
+   the first colour nobody holds */
+function reassignColors(g) {
+  const used = new Set();
+  g.players.forEach((p) => {
+    if (!p.claimed || p.color == null || used.has(p.color)) {
+      let c = 0;
+      while (used.has(c)) c++;
+      p.color = c;
+    }
+    used.add(p.color);
+  });
+}
+
+function chooseColor(g, p, c) {
+  if (c !== MULTI && !(c >= 0 && c < PC.length)) return false;
+  if (g.players[p].color === c) return false;
+  if (g.players.some((q, j) => j !== p && q.color === c)) return false;
+  g.players[p].color = c;
+  say(g, `${pname(g, p)} now builds in ${c === MULTI ? "every colour at once" : PC[c].name.toLowerCase()}.`);
+  return g;
+}
 const resetLobbyOrder = (g) => {
   const b = Array.from({ length: g.players.length }, (_, i) => i);
   g.setupOrder = [...b, ...b.slice().reverse()];
@@ -397,7 +432,8 @@ function lobbyRemoveSeat(g, i) {
   g.players.splice(i, 1); g.hands.splice(i, 1); g.devHands.splice(i, 1);
   g.knights.splice(i, 1); g.roadLen.splice(i, 1); g.stats.splice(i, 1); g.seriesStats.splice(i, 1);
   if (g.wins) g.wins.splice(i, 1);
-  g.players.forEach((p, j) => { p.color = j; if (!p.claimed) p.name = `Player ${j + 1}`; });
+  g.players.forEach((p, j) => { if (!p.claimed) p.name = `Player ${j + 1}`; });
+  reassignColors(g);
   resetLobbyOrder(g);
   say(g, "A seat was removed.");
   return g;
@@ -406,6 +442,7 @@ function lobbyAddSeat(g) {
   if (g.phase !== "lobby" || g.players.length >= 4) return false;
   const j = g.players.length;
   g.players.push({ name: `Player ${j + 1}`, color: j, claimed: false, lock: "", tok: "" });
+  reassignColors(g);
   g.hands.push(emptyHand()); g.devHands.push([]); g.knights.push(0); g.roadLen.push(0);
   g.stats.push([0, 0, 0]); g.seriesStats.push([0, 0, 0]);
   if (g.wins) g.wins.push(0);
@@ -421,6 +458,7 @@ function makeRematch(prev, code) {
     g.players[i].claimed = true;
     g.players[i].tok = p.tok;
     g.players[i].lock = p.lock;
+    g.players[i].color = p.color; // chosen colours ride into the rematch
   });
   g.wins = prev.players.map((_, i) => (prev.wins?.[i] || 0) + (prev.winner === i ? 1 : 0));
   g.history = [
@@ -463,7 +501,7 @@ function startLobby(g, dropOpen) {
         if (g.wins) g.wins.splice(i, 1);
       }
     }
-    g.players.forEach((p, j) => { p.color = j; });
+    reassignColors(g);
   }
   const n = g.players.length;
   if (n < 2 || g.players.some((p) => !p.claimed)) return false;
@@ -831,6 +869,7 @@ function pack(g) {
     q: g.seq || 0,
     n: g.players.map((p) => p.name),
     cl: g.players.map((p) => (p.claimed ? 1 : 0)),
+    co: g.players.map((p) => p.color),
     lk: g.players.map((p) => p.lock || ""),
     tk: g.players.map((p) => p.tok || ""),
     ht: g.hostTok || "",
@@ -904,7 +943,7 @@ function unpack(o) {
     seq: o.q || 0,
     /* legacy blobs have no cl — everyone starts unclaimed and re-picks a seat */
     hostTok: o.ht || "",
-    players: o.n.map((nm, i) => ({ name: nm, color: i, claimed: !!(o.cl && o.cl[i]), lock: (o.lk && o.lk[i]) || "", tok: (o.tk && o.tk[i]) || "" })),
+    players: o.n.map((nm, i) => ({ name: nm, color: o.co ? o.co[i] : i, claimed: !!(o.cl && o.cl[i]), lock: (o.lk && o.lk[i]) || "", tok: (o.tk && o.tk[i]) || "" })),
     board: { hexes, ports, robber: GEO.hexes[o.rb].id },
     buildings, roads,
     hands: o.h.map((x) => Object.fromEntries(RES.map((r, i) => [r, x[i]]))),
@@ -1405,12 +1444,12 @@ function Board({ g, sel, onPick, pending }) {
           runs its mount animation (the slam / the build) */}
       {Object.entries(g.roads).map(([e, owner]) => {
         const r = roadPath(e);
-        return <line key={e} className="hb-road" x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={PC[g.players[owner].color].hex}
+        return <line key={e} className="hb-road" x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={pieceFill(g.players[owner].color, e)}
           strokeWidth="2.1" strokeLinecap="round" />;
       })}
       {Object.entries(g.buildings).map(([v, bl]) => {
         const p = GEO.vertexPos[v];
-        const col = PC[g.players[bl.owner].color].hex;
+        const col = pieceFill(g.players[bl.owner].color, v);
         return bl.type === "settlement" ? (
           <polygon key={v} className="hb-build" points={`${p.x - 2},${p.y + 2} ${p.x - 2},${p.y - 0.6} ${p.x},${p.y - 2.6} ${p.x + 2},${p.y - 0.6} ${p.x + 2},${p.y + 2}`}
             fill={col} stroke="rgba(6,20,25,.75)" strokeWidth="0.45" />
@@ -1962,7 +2001,7 @@ export default function App() {
                 <React.Fragment key={i}>
                   <Btn tone={rejoinSel === i ? "go" : "plain"}
                     onClick={() => (p.claimed ? setRejoinSel(rejoinSel === i ? null : i) : claim(i))}>
-                    <span style={{ display: "inline-block", width: 9, height: 9, borderRadius: 2, background: PC[p.color].hex, marginRight: 8 }} />
+                    <span style={{ display: "inline-block", width: 9, height: 9, borderRadius: 2, background: swatchBg(p.color), marginRight: 8 }} />
                     {p.claimed ? `${p.name} — taken · rejoin?` : `Take this seat${p.name.startsWith("Player ") ? "" : ` (${p.name})`}`}
                   </Btn>
                   {rejoinSel === i && (
@@ -2029,7 +2068,7 @@ export default function App() {
               {g.players.map((p, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, border: `1px solid ${C.line}`,
                   borderRadius: 6, padding: "10px 12px", background: p.claimed ? "rgba(255,255,255,.04)" : "transparent" }}>
-                  <span style={{ width: 10, height: 10, borderRadius: 3, background: PC[p.color].hex }} />
+                  <span style={{ width: 10, height: 10, borderRadius: 3, background: swatchBg(p.color) }} />
                   <span style={{ flex: 1, fontSize: 15, color: p.claimed ? C.parch : C.parchDim, fontStyle: p.claimed ? "normal" : "italic" }}>
                     {p.claimed ? `${p.name}${i === seat ? " (you)" : ""}` : "open seat — waiting…"}
                   </span>
@@ -2169,7 +2208,7 @@ export default function App() {
               background: i === g.turn && g.winner == null ? "rgba(224,164,55,.09)" : "rgba(255,255,255,.02)",
               borderRadius: 5, padding: "6px 5px", textAlign: "center", cursor: i === actor ? "pointer" : "default" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4 }}>
-                <span style={{ width: 8, height: 8, borderRadius: 2, background: PC[p.color].hex }} />
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: swatchBg(p.color) }} />
                 <span style={{ fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 58 }}>{p.name}</span>
               </div>
               <div style={{ fontFamily: dispFont, fontSize: 19, lineHeight: 1.15 }}>{scoreFor(g, i, i === actor)}</div>
@@ -2271,7 +2310,7 @@ export default function App() {
               {standings(g).map((s, rank) => (
                 <div key={s.i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
                   <span style={{ width: 16, fontFamily: dispFont, fontSize: 12, color: C.parchDim }}>{rank + 1}</span>
-                  <span style={{ width: 9, height: 9, borderRadius: 2, background: PC[g.players[s.i].color].hex }} />
+                  <span style={{ width: 9, height: 9, borderRadius: 2, background: swatchBg(g.players[s.i].color) }} />
                   <span style={{ flex: 1, fontSize: 14, color: rank === 0 ? C.gold : C.parch }}>{s.name}</span>
                   <span style={{ fontFamily: dispFont, fontSize: 15, color: rank === 0 ? C.gold : C.parch }}>{s.w}</span>
                 </div>
@@ -2481,7 +2520,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
                 <div key={s.i} style={{ padding: "3px 0" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ width: 16, fontFamily: dispFont, fontSize: 12, color: C.parchDim }}>{rank + 1}</span>
-                    <span style={{ width: 9, height: 9, borderRadius: 2, background: PC[g.players[s.i].color].hex }} />
+                    <span style={{ width: 9, height: 9, borderRadius: 2, background: swatchBg(g.players[s.i].color) }} />
                     <span style={{ flex: 1, fontSize: 14, color: rank === 0 && s.w > 0 ? C.gold : C.parch }}>{s.name}</span>
                     <span style={{ fontFamily: dispFont, fontSize: 15, color: rank === 0 && s.w > 0 ? C.gold : C.parch }}>{s.w}</span>
                   </div>
@@ -2505,7 +2544,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
                   </div>
                   {g.players.map((pl, i) => (
                     <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0" }}>
-                      <span style={{ width: 9, height: 9, borderRadius: 2, background: PC[pl.color].hex }} />
+                      <span style={{ width: 9, height: 9, borderRadius: 2, background: swatchBg(pl.color) }} />
                       <span style={{ flex: 1, fontSize: 12, color: C.parchDim }}>{pl.name}</span>
                       <span style={{ display: "flex", gap: 4 }}>
                         {recent.map((e, k) => {
@@ -2633,7 +2672,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
     return (
       <Sheet title={mine ? `${p.name} — you` : p.name} onClose={close}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-          <span style={{ width: 12, height: 12, borderRadius: 3, background: PC[p.color].hex }} />
+          <span style={{ width: 12, height: 12, borderRadius: 3, background: swatchBg(p.color) }} />
           <span style={{ fontFamily: dispFont, fontSize: 16, letterSpacing: ".08em" }}>
             {(() => {
               const pub = scoreFor(g, who, false);
@@ -2650,6 +2689,29 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         {(g.wins?.[who] || 0) > 0 && rowLine("Series wins", g.wins[who])}
         {mine && g.devHands[who].filter((c) => !c.used).length > 0 &&
           rowLine("Still in your hand", g.devHands[who].filter((c) => !c.used).map((c) => DEV_LABEL[c.type]).join(", "))}
+        {mine && (
+          <div style={{ marginTop: 14 }}>
+            <Eyebrow>Your house colour</Eyebrow>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {[...PC.map((_, ci) => ci), MULTI].map((ci) => {
+                const taken = g.players.some((q, j) => j !== who && q.color === ci);
+                const cur = g.players[who].color === ci;
+                return (
+                  <button key={ci} title={"colour-" + ci} disabled={taken}
+                    onClick={() => apply((d) => chooseColor(d, who, ci))}
+                    style={{ width: 32, height: 32, borderRadius: 6, padding: 0,
+                      background: swatchBg(ci), opacity: taken ? 0.22 : 1,
+                      cursor: taken ? "default" : "pointer",
+                      border: cur ? `2px solid ${C.parch}` : `1px solid ${C.line}`,
+                      boxShadow: cur ? "0 0 0 2px rgba(239,230,210,.25)" : "none" }} />
+                );
+              })}
+            </div>
+            <div style={{ marginTop: 6, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
+              The rainbow one paints every road and house a different colour. Greyed swatches are taken.
+            </div>
+          </div>
+        )}
         {mine && (
           <Btn style={{ width: "100%", marginTop: 14 }} onClick={() => setModal({ k: "rename" })}>
             Edit your name &amp; secret word
@@ -2733,7 +2795,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
               background: partner === i ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
               border: `1px solid ${partner === i ? C.gold : C.line}`, borderRadius: 5, padding: "8px 12px",
               color: C.parch, fontFamily: dispFont, fontSize: 13, cursor: "pointer" }}>
-              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: PC[p.color].hex, marginRight: 6 }} />
+              <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: swatchBg(p.color), marginRight: 6 }} />
               {p.name}
             </button>
           ))}

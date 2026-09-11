@@ -378,6 +378,19 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   }
 }
 
+// ---- pick your house colour, even multicolour ----
+{
+  const w = phones[2];
+  tap(w, w.document.querySelector('[title="Your record"]'));
+  await wait(w, (x) => H(x).includes("Your house colour"));
+  tap(w, w.document.querySelector('[title="colour-5"]'));
+  check("a chosen colour syncs to every phone", await wait(phones[0], (x) => H(x).includes("#8e6bb5")));
+  tap(w, w.document.querySelector('[title="colour-99"]'));
+  check("multicolour paints the whole set", await wait(phones[0], (x) => H(x).includes("linear-gradient")));
+  click(w, "×");
+  await sleep(150);
+}
+
 // ---- rejoining a claimed seat from a brand-new phone ----
 {
   const G = boot(joinLink); // no seeded storage: a phone this game has never seen
