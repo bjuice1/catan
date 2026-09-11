@@ -164,7 +164,7 @@ check("setup completes into the roll phase",
 }
 
 // ---- turns: each phone acts on its own, server carries the moves ----
-let passes = 0, sevens = 0, discards = 0, robbers = 0;
+let passes = 0, sevens = 0, discards = 0, robbers = 0, stripEnd = false;
 let deputyTried = false, deputyWorked = false;
 // the own-discard button is exactly "Discard N cards" — the deputy button
 // also contains the word "discard", so match precisely
@@ -214,9 +214,11 @@ for (let t = 0; t < 35; t++) {
     if (v) { tap(stealer, v); await sleep(240); }
   }
   const ender = phones.find((w) => btn(w, "End turn"));
+  if (ender && !stripEnd) stripEnd = (H(ender).match(/>End turn</g) || []).length >= 2;
   if (ender) { click(ender, "End turn"); passes++; await sleep(200); }
 }
 check("turns advance across phones", passes > 15);
+check("End turn also sits in the dice strip", stripEnd);
 check("sevens were resolved from each phone", sevens === 0 || discards >= sevens);
 check("a table-mate can discard for an away player", sevens === 0 || deputyWorked);
 check("no phone was ever asked to send a link", !sawHandoffScreen);
@@ -357,18 +359,22 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   check("reopening the invite link restores your seat", backIn && H(re).includes("you're Ann") || H(re).includes("Your turn, Ann"));
 }
 
-// ---- renaming yourself mid-game syncs to everyone ----
+// ---- your own card shows your full record, and renames sync ----
 {
-  const card = A.document.querySelector('[title="Edit your name"]');
+  const card = A.document.querySelector('[title="Your record"]');
   if (card) {
     tap(A, card);
+    const peeked = await wait(A, (x) => H(x).includes("points ("));
+    check("your own card shows your played cards and record",
+      peeked && H(A).includes("Dev cards played") && H(A).includes("Knights on the table"));
+    click(A, "Edit your name");
     await wait(A, (x) => !!x.document.querySelector("input"));
     setInput(A, A.document.querySelector("input"), "Annie");
     await sleep(80);
     click(A, "Save");
     check("rename syncs to the other phones", await wait(phones[1], (x) => H(x).includes("Annie")));
   } else {
-    check("own player card offers a rename control", false);
+    check("own player card opens your record", false);
   }
 }
 
@@ -384,8 +390,10 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
 
 // ---- a secret word protects a seat from strangers ----
 {
-  // Annie sets a secret word on her seat
-  tap(A, A.document.querySelector('[title="Edit your name"]'));
+  // Annie sets a secret word on her seat (via her record sheet)
+  tap(A, A.document.querySelector('[title="Your record"]'));
+  await wait(A, (x) => H(x).includes("Edit your name"));
+  click(A, "Edit your name");
   await wait(A, (x) => x.document.querySelectorAll("input").length === 2);
   setInput(A, A.document.querySelectorAll("input")[1], "harborqueen");
   await sleep(80);

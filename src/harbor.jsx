@@ -2163,8 +2163,8 @@ export default function App() {
         </div>
         <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
           {g.players.map((p, i) => (
-            <div key={i} title={i === actor ? "Edit your name" : `What ${p.name} has played`}
-              onClick={i === actor ? () => setModal({ k: "rename" }) : () => setModal({ k: "peek", who: i })}
+            <div key={i} title={i === actor ? "Your record" : `What ${p.name} has played`}
+              onClick={() => setModal({ k: "peek", who: i })}
               style={{ flex: 1, border: `1px solid ${i === g.turn && g.winner == null ? C.gold : C.line}`,
               background: i === g.turn && g.winner == null ? "rgba(224,164,55,.09)" : "rgba(255,255,255,.02)",
               borderRadius: 5, padding: "6px 5px", textAlign: "center", cursor: i === actor ? "pointer" : "default" }}>
@@ -2228,6 +2228,10 @@ export default function App() {
             </span>
           )}
           <span style={{ fontSize: 15, lineHeight: 1.4 }}>{status}</span>
+          {myTurn && g.phase === "main" && (
+            <Btn tone="warn" style={{ marginLeft: "auto", padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
+              onClick={() => apply((d) => endTurn(d))}>End turn</Btn>
+          )}
         </div>
         {g.rolls.length > 1 && (
           <div onClick={() => setModal({ k: "rolls" })} style={{ marginTop: 6, color: C.parchDim, fontSize: 12,
@@ -2625,12 +2629,18 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         <span style={{ fontSize: 14, textAlign: "right" }}>{value}</span>
       </div>
     );
+    const mine = who === actor;
     return (
-      <Sheet title={p.name} onClose={close}>
+      <Sheet title={mine ? `${p.name} — you` : p.name} onClose={close}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
           <span style={{ width: 12, height: 12, borderRadius: 3, background: PC[p.color].hex }} />
           <span style={{ fontFamily: dispFont, fontSize: 16, letterSpacing: ".08em" }}>
-            {scoreFor(g, who, false)} points showing
+            {(() => {
+              const pub = scoreFor(g, who, false);
+              const full = scoreFor(g, who, true);
+              const pts = (n) => `${n} point${n === 1 ? "" : "s"}`;
+              return mine ? `${pts(full)} (${pub} showing)` : `${pts(pub)} showing`;
+            })()}
           </span>
         </div>
         {rowLine("Dev cards played", playedSummary(g, who) || "none yet")}
@@ -2638,9 +2648,17 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         {rowLine("Longest road", `${g.roadLen[who]} segment${g.roadLen[who] === 1 ? "" : "s"}${g.longestRoad === who ? " · holds Longest Road" : ""}`)}
         {rowLine("Cards in hand", `${handTotal(g.hands[who])} resource · ${g.devHands[who].filter((c) => !c.used).length} dev`)}
         {(g.wins?.[who] || 0) > 0 && rowLine("Series wins", g.wins[who])}
+        {mine && g.devHands[who].filter((c) => !c.used).length > 0 &&
+          rowLine("Still in your hand", g.devHands[who].filter((c) => !c.used).map((c) => DEV_LABEL[c.type]).join(", "))}
+        {mine && (
+          <Btn style={{ width: "100%", marginTop: 14 }} onClick={() => setModal({ k: "rename" })}>
+            Edit your name &amp; secret word
+          </Btn>
+        )}
         <div style={{ marginTop: 12, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
-          Everything here is table-visible information — played cards, counts, and public score.
-          Hidden victory points stay hidden until they win with them.
+          {mine
+            ? "Others see all of this except your unplayed cards and hidden victory points."
+            : "Everything here is table-visible information — played cards, counts, and public score. Hidden victory points stay hidden until they win with them."}
         </div>
       </Sheet>
     );
