@@ -590,10 +590,14 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     const kg = JSON.parse(storage["harbor-games"] || "[]");
     kg.unshift({ code: code3, t: Date.now() }); // this phone also knows the Trio game
     storage["harbor-games"] = JSON.stringify(kg);
+    // pretend this phone holds the Trio seat whose turn it is, so the pill must pulse
+    storage["harbor-seat-" + code3] = H(G).includes("Your turn,") ? "0" : "1";
     const T = boot(joinLink, storage);
     await wait(T, (x) => H(x).includes("<svg"), 6000);
     const pill = await wait(T, (x) => !!x.document.querySelector(`[title="switch-${code3}"]`), 5000);
     check("a toggle pill shows the other live game", pill);
+    check("the pill pulses when that game is waiting on you",
+      await wait(T, (x) => !!x.document.querySelector(`.hb-urgent[title="switch-${code3}"]`), 5000));
     if (pill) {
       tap(T, T.document.querySelector(`[title="switch-${code3}"]`));
       check("tapping the pill jumps straight into that game",

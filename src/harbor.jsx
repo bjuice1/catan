@@ -1189,7 +1189,9 @@ const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght
 .hb-build{animation:hbRise .5s cubic-bezier(.2,1.4,.4,1);transform-box:fill-box;transform-origin:50% 100%}
 .hb-robber{animation:hbThud .55s cubic-bezier(.3,1.3,.5,1)}
 .hb-shake{animation:hbShake .4s ease-out}
-.hb-die{animation:hbDiePop .45s cubic-bezier(.2,1.4,.4,1)}`;
+.hb-die{animation:hbDiePop .45s cubic-bezier(.2,1.4,.4,1)}
+@keyframes hbPulse{0%,100%{box-shadow:0 0 0 0 rgba(224,164,55,.55)}50%{box-shadow:0 0 0 5px rgba(224,164,55,0)}}
+.hb-urgent{animation:hbPulse 1.3s ease-out infinite}`;
 const dispFont = "'Oswald', 'Helvetica Neue', sans-serif";
 const bodyFont = "'Spectral', Georgia, serif";
 
@@ -1234,6 +1236,19 @@ function Fireworks({ letter }) {
           animation: `hbFall ${p.dur}s linear ${p.delay}s infinite` }}>{letter}</span>
       ))}
     </div>
+  );
+}
+
+function GamePill({ o, onGo }) {
+  return (
+    <button title={"switch-" + o.code} onClick={() => onGo(o.code)}
+      className={o.myTurn ? "hb-urgent" : undefined}
+      style={{ background: o.myTurn ? "rgba(224,164,55,.22)" : "rgba(255,255,255,.05)",
+        border: `1px solid ${o.myTurn ? C.gold : C.line}`, borderRadius: 5, padding: "4px 8px",
+        color: o.myTurn ? C.gold : C.parchDim, fontFamily: dispFont, fontSize: 11,
+        letterSpacing: ".08em", cursor: "pointer", flexShrink: 0 }}>
+      ⇄ {o.code}{o.myTurn && <span style={{ color: C.gold }}> ●</span>}
+    </button>
   );
 }
 
@@ -1685,7 +1700,11 @@ export default function App() {
     const code = g.code;
     let dead = false;
     const scan = async () => {
-      const list = knownGames().filter((it) => it.code !== code).slice(0, 4);
+      const known = knownGames();
+      // a rematch this phone hasn't joined yet still counts as a live game
+      const rm = gRef.current && gRef.current.rematch;
+      if (rm && !known.some((it) => it.code === rm)) known.unshift({ code: rm });
+      const list = known.filter((it) => it.code !== code).slice(0, 4);
       const out = [];
       for (const it of list) {
         const res = await serverGet(it.code);
@@ -2269,15 +2288,17 @@ export default function App() {
               : actor == null ? `${pname(g, g.turn)}'s turn — you're watching`
               : `${pname(g, g.turn)}'s turn — you're ${pname(g, actor)}`}
           </span>
-          {others.map((o) => (
-            <button key={o.code} title={"switch-" + o.code} onClick={() => switchGame(o.code)}
-              style={{ background: o.myTurn ? "rgba(224,164,55,.18)" : "rgba(255,255,255,.05)",
-                border: `1px solid ${o.myTurn ? C.gold : C.line}`, borderRadius: 5, padding: "4px 8px",
-                color: o.myTurn ? C.gold : C.parchDim, fontFamily: dispFont, fontSize: 11,
-                letterSpacing: ".08em", cursor: "pointer", flexShrink: 0 }}>
-              ⇄ {o.code}{o.myTurn && <span style={{ color: C.gold }}> ●</span>}
-            </button>
-          ))}
+          {others.map((o) => <GamePill key={o.code} o={o} onGo={switchGame} />)}
+        </div>
+      )}
+
+      {/* from a finished board, the next game that's already going stays one tap away */}
+      {g.winner != null && others.length > 0 && (
+        <div style={{ padding: "6px 14px", borderBottom: `1px solid ${C.line}`, display: "flex",
+          alignItems: "center", gap: 6, fontFamily: dispFont, fontSize: 12, letterSpacing: ".12em",
+          textTransform: "uppercase", color: C.parchDim }}>
+          <span style={{ flex: 1 }}>Games still going</span>
+          {others.map((o) => <GamePill key={o.code} o={o} onGo={switchGame} />)}
         </div>
       )}
 
