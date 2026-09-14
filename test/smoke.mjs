@@ -582,6 +582,24 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   click(G, "Start with 2");
   const started = await wait(G, (x) => H(x).includes("<svg"), 5000) && await wait(Hh, (x) => H(x).includes("<svg"), 5000);
   check("the host can start with fewer, dropping the empty seat", started && (H(G).match(/·\s*\d+d/g) || []).length === 2);
+
+  // ---- toggle pills jump between live games without the lobby ----
+  {
+    const storage = {};
+    for (let i = 0; i < A.localStorage.length; i++) { const k = A.localStorage.key(i); storage[k] = A.localStorage.getItem(k); }
+    const kg = JSON.parse(storage["harbor-games"] || "[]");
+    kg.unshift({ code: code3, t: Date.now() }); // this phone also knows the Trio game
+    storage["harbor-games"] = JSON.stringify(kg);
+    const T = boot(joinLink, storage);
+    await wait(T, (x) => H(x).includes("<svg"), 6000);
+    const pill = await wait(T, (x) => !!x.document.querySelector(`[title="switch-${code3}"]`), 5000);
+    check("a toggle pill shows the other live game", pill);
+    if (pill) {
+      tap(T, T.document.querySelector(`[title="switch-${code3}"]`));
+      check("tapping the pill jumps straight into that game",
+        await wait(T, (x) => H(x).includes(code3), 5000));
+    }
+  }
 }
 
 // ---- winning, then a one-tap rematch that keeps everyone seated ----

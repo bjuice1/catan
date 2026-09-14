@@ -1509,6 +1509,7 @@ export default function App() {
   const [rejoinWord, setRejoinWord] = useState("");
   const [booting, setBooting] = useState(true);
   const [lobby, setLobby] = useState(null);
+  const [others, setOthers] = useState([]);
   const [pushReady, setPushReady] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [pending, setPending] = useState(null);
@@ -1676,6 +1677,42 @@ export default function App() {
       say(d, "The trade offer expired before it was answered.");
     });
   }, [g, seat, now]);
+
+  /* quietly watch this phone's other live games so the toggle pills can show
+     a your-turn dot without a trip through the lobby */
+  useEffect(() => {
+    if (!g) { setOthers([]); return; }
+    const code = g.code;
+    let dead = false;
+    const scan = async () => {
+      const list = knownGames().filter((it) => it.code !== code).slice(0, 4);
+      const out = [];
+      for (const it of list) {
+        const res = await serverGet(it.code);
+        if (!res) continue;
+        try {
+          const gm = await decodeGame(res.blob);
+          if (gm.winner != null) continue; // only games still alive
+          const s = knownSeat(it.code);
+          out.push({
+            code: it.code,
+            myTurn: s != null && gm.phase !== "lobby" && (gm.turn === s || (gm.pendingDiscard[s] || 0) > 0),
+          });
+        } catch { /* skip an unreadable game */ }
+      }
+      if (!dead) setOthers(out);
+    };
+    scan();
+    const id = setInterval(scan, Math.max((window.HARBOR_POLL_MS || 3000) * 3, 300));
+    return () => { dead = true; clearInterval(id); };
+  }, [g && g.code]);
+
+  /* jump straight into another live game — no lobby detour */
+  const switchGame = async (code) => {
+    setModal(null); setSel(null); setPending(null); setNote(""); setSpectate(false);
+    setSeat(knownSeat(code));
+    await loadByCode(code);
+  };
 
   /* keep this phone's push subscription registered for the current game */
   useEffect(() => {
@@ -2224,11 +2261,23 @@ export default function App() {
 
       {/* whose turn */}
       {g.winner == null && (
-        <div style={{ padding: "8px 14px", background: "rgba(224,164,55,.1)", borderBottom: `1px solid ${C.line}`,
-          fontFamily: dispFont, fontSize: 12, letterSpacing: ".12em", textTransform: "uppercase", color: C.gold }}>
-          {myTurn ? `Your turn, ${pname(g, actor)}`
-            : actor == null ? `${pname(g, g.turn)}'s turn — you're watching`
-            : `${pname(g, g.turn)}'s turn — you're ${pname(g, actor)}`}
+        <div style={{ padding: "6px 14px", background: "rgba(224,164,55,.1)", borderBottom: `1px solid ${C.line}`,
+          fontFamily: dispFont, fontSize: 12, letterSpacing: ".12em", textTransform: "uppercase", color: C.gold,
+          display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ flex: 1, padding: "2px 0" }}>
+            {myTurn ? `Your turn, ${pname(g, actor)}`
+              : actor == null ? `${pname(g, g.turn)}'s turn — you're watching`
+              : `${pname(g, g.turn)}'s turn — you're ${pname(g, actor)}`}
+          </span>
+          {others.map((o) => (
+            <button key={o.code} title={"switch-" + o.code} onClick={() => switchGame(o.code)}
+              style={{ background: o.myTurn ? "rgba(224,164,55,.18)" : "rgba(255,255,255,.05)",
+                border: `1px solid ${o.myTurn ? C.gold : C.line}`, borderRadius: 5, padding: "4px 8px",
+                color: o.myTurn ? C.gold : C.parchDim, fontFamily: dispFont, fontSize: 11,
+                letterSpacing: ".08em", cursor: "pointer", flexShrink: 0 }}>
+              ⇄ {o.code}{o.myTurn && <span style={{ color: C.gold }}> ●</span>}
+            </button>
+          ))}
         </div>
       )}
 
