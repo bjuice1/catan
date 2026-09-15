@@ -1726,6 +1726,25 @@ export default function App() {
     return () => { dead = true; clearInterval(id); };
   }, [g && g.code]);
 
+  /* a friendly quack at whoever the game is waiting on */
+  const sendGull = async () => {
+    const cur = gRef.current;
+    const targets = cur.phase === "discard" ? Object.keys(cur.pendingDiscard).map(Number) : [cur.turn];
+    try {
+      const r = await fetch(new URL("/api/poke/" + cur.code, window.location.href), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ to: targets, by: actor != null ? pname(cur, actor) : "A spectator" }),
+      });
+      const j = await r.json();
+      setNote(j.nosub
+        ? "They haven't turned on notifications — the duck has nowhere to land."
+        : j.sent.length
+          ? "🦆 Duck away — it will quack on their phone."
+          : "🦆 A duck is already circling them — give it a few minutes.");
+    } catch { setNote("The duck could not take off — check your connection."); }
+  };
+
   /* jump straight into another live game — no lobby detour */
   const switchGame = async (code) => {
     setModal(null); setSel(null); setPending(null); setNote(""); setSpectate(false);
@@ -2341,6 +2360,10 @@ export default function App() {
             <Btn tone="warn" style={{ marginLeft: "auto", padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
               onClick={() => apply((d) => endTurn(d))}>End turn</Btn>
           )}
+          {!myTurn && g.winner == null && owed === 0 && g.players[g.turn]?.claimed && (
+            <Btn style={{ marginLeft: "auto", padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
+              onClick={sendGull}>🦆 Send a duck</Btn>
+          )}
         </div>
         {g.rolls.length > 1 && (
           <div onClick={() => setModal({ k: "rolls" })} style={{ marginTop: 6, color: C.parchDim, fontSize: 12,
@@ -2350,7 +2373,7 @@ export default function App() {
             ))}
           </div>
         )}
-        {note && <div style={{ marginTop: 6, color: note.startsWith("You stole") || note.includes("accepted your trade") ? C.gold : "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
+        {note && <div style={{ marginTop: 6, color: note.startsWith("You stole") || note.startsWith("🦆") || note.includes("accepted your trade") ? C.gold : "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
       </div>
 
       {/* your hand rides directly under the board — the thing you check most */}

@@ -228,6 +228,34 @@ http.createServer((req, res) => {
     return json(res, 405, { error: "method not allowed" });
   }
 
+  /* a manual poke: one gull per target per 3 minutes, however many senders */
+  const pk = u.pathname.match(/^\/api\/poke\/([A-Z0-9]{4,8})$/);
+  if (pk && req.method === "POST") {
+    readBody(req, (body) => {
+      let to, by;
+      try { ({ to, by } = JSON.parse(body)); } catch { return json(res, 400, { error: "bad json" }); }
+      if (!Array.isArray(to) || !to.length || !to.every((s) => Number.isInteger(s) && s >= 0 && s <= 5)) {
+        return json(res, 400, { error: "bad payload" });
+      }
+      const code = pk[1];
+      const name = (typeof by === "string" && by.trim() ? by.trim() : "Someone").slice(0, 20);
+      const win = Math.floor(Date.now() / 180000);
+      const gameSubs = subs.get(code) || new Map();
+      const sent = [], cooled = [];
+      let seen = pinged.get(code);
+      if (!seen) { seen = new Set(); pinged.set(code, seen); }
+      for (const seat of new Set(to)) {
+        if (!gameSubs.has(seat)) continue;
+        const tag = `poke:${seat}:${win}`;
+        if (seen.has(tag)) { cooled.push(seat); continue; }
+        notify(code, seat, { title: "Harbor · " + code, body: `🦆 ${name} sent a duck — quack, your move.`, code }, tag);
+        sent.push(seat);
+      }
+      return json(res, 200, { sent, cooled, nosub: !sent.length && !cooled.length });
+    });
+    return;
+  }
+
   if (req.url === "/api/push/key" && req.method === "GET") {
     return json(res, 200, { key: vapid.publicKey });
   }

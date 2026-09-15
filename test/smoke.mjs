@@ -33,6 +33,13 @@ const waitHealthy = async () => {
   }
   return false;
 };
+// a previous crashed run can leave an orphan on the port — refuse to test
+// against a stale server (it silently fails only the newest endpoints)
+try {
+  await fetch(BASE + "health", { signal: AbortSignal.timeout(600) });
+  console.log(`FATAL: something already listens on ${PORT} — kill it first: lsof -ti :${PORT} | xargs kill`);
+  process.exit(1);
+} catch { /* port is free, good */ }
 let srv = spawnServer();
 let srvErr = "";
 srv.stderr.on("data", (c) => { srvErr += c; });
@@ -463,6 +470,31 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   await sleep(300);
   const alive = (await (await fetch(BASE + "health")).text()) === "ok";
   check("a failing push delivery never breaks the store", put.ok && alive);
+
+  // ---- the duck: a manual poke, one per target per window ----
+  const poke = async (to) => {
+    const r = await fetch(BASE + "api/poke/" + code, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to, by: "Ann" }),
+    });
+    const t = await r.text();
+    try { return JSON.parse(t); }
+    catch { console.log("POKE DEBUG", r.status, BASE + "api/poke/" + code, t.slice(0, 120)); return { sent: [], cooled: [], nosub: false }; }
+  };
+  const g1 = await poke([1]);
+  check("a duck flies to a subscribed player", g1.sent.length === 1 && !g1.nosub);
+  const g2 = await poke([1]);
+  check("a second duck inside the window is refused", g2.cooled.length === 1 && !g2.sent.length);
+  const g3 = await poke([3]);
+  check("a duck to an unsubscribed player reports nowhere to land", g3.nosub === true);
+
+  // and the button shows on a phone that's waiting
+  const waiter = phones.find((w) => btn(w, "Send a duck"));
+  check("a waiting phone offers Send a duck", !!waiter);
+  if (waiter) {
+    click(waiter, "Send a duck");
+    check("the duck button reports back", await wait(waiter, (x) => /duck|land/i.test(H(x)), 4000));
+  }
 }
 
 // ---- the lobby: the app icon opens a list of your games ----
