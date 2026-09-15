@@ -228,7 +228,7 @@ http.createServer((req, res) => {
     return json(res, 405, { error: "method not allowed" });
   }
 
-  /* a manual poke: one duck per target per 30 minutes, however many senders */
+  /* a manual poke: one duck per target per 5 hours, however many senders */
   const pk = u.pathname.match(/^\/api\/poke\/([A-Z0-9]{4,8})$/);
   if (pk && req.method === "POST") {
     readBody(req, (body) => {
@@ -239,7 +239,7 @@ http.createServer((req, res) => {
       }
       const code = pk[1];
       const name = (typeof by === "string" && by.trim() ? by.trim() : "Someone").slice(0, 20);
-      const win = Math.floor(Date.now() / (30 * 60 * 1000));
+      const win = Math.floor(Date.now() / (5 * 60 * 60 * 1000));
       const gameSubs = subs.get(code) || new Map();
       const sent = [], cooled = [];
       let seen = pinged.get(code);
