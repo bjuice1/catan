@@ -1741,7 +1741,7 @@ export default function App() {
         ? "They haven't turned on notifications — the duck has nowhere to land."
         : j.sent.length
           ? "🦆 Duck away — it will quack on their phone."
-          : "🦆 A duck is already circling them — give it a few minutes.");
+          : "🦆 A duck is already circling them — one per half hour is plenty.");
     } catch { setNote("The duck could not take off — check your connection."); }
   };
 
