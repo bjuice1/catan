@@ -353,6 +353,8 @@ function newGame(code, names) {
     turnNo: 0,
     rolls: [],
     sevenAt: 0,
+    duckAt: 0,
+    chat: [], // {p, m} — last 40 messages ride in the blob
     rules: { win: 10, friendly: false },
     stats: names.map(() => [0, 0, 0]),       // gained, stolen, sevens (this game)
     seriesStats: names.map(() => [0, 0, 0]), // same, summed over finished games
@@ -405,6 +407,13 @@ function reassignColors(g) {
     }
     used.add(p.color);
   });
+}
+
+function sendChat(g, p, text) {
+  const m = String(text || "").trim().slice(0, 140);
+  if (!m || p == null) return false;
+  g.chat = [...(g.chat || []), { p, m }].slice(-40);
+  return g;
 }
 
 function chooseColor(g, p, c) {
@@ -891,6 +900,8 @@ function pack(g) {
     so: g.setupOrder.slice(0, g.players.length).join(""),
     rl: g.rolls.join(","),
     sa: g.sevenAt || 0,
+    da: g.duckAt || 0,
+    cm: (g.chat || []).map((c) => [c.p, c.m]),
     tr: g.trade ? [g.trade.from, g.trade.to, ...RES.map((r) => g.trade.give[r] || 0), ...RES.map((r) => g.trade.want[r] || 0), g.trade.at || 0] : 0,
     ph: PH_LIST.indexOf(g.phase),
     si: g.setupIdx,
@@ -958,6 +969,8 @@ function unpack(o) {
     turn: o.tu, turnNo: o.tn,
     rolls: o.rl ? o.rl.split(",").map(Number) : [],
     sevenAt: o.sa || 0,
+    duckAt: o.da || 0,
+    chat: (o.cm || []).map(([p, m]) => ({ p, m })),
     phase: PH_LIST[o.ph],
     setupOrder: order, setupIdx: o.si,
     lastSetupVertex: o.lv < 0 ? null : VIDX[o.lv],
@@ -1191,7 +1204,15 @@ const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght
 .hb-shake{animation:hbShake .4s ease-out}
 .hb-die{animation:hbDiePop .45s cubic-bezier(.2,1.4,.4,1)}
 @keyframes hbPulse{0%,100%{box-shadow:0 0 0 0 rgba(224,164,55,.55)}50%{box-shadow:0 0 0 5px rgba(224,164,55,0)}}
-.hb-urgent{animation:hbPulse 1.3s ease-out infinite}`;
+.hb-urgent{animation:hbPulse 1.3s ease-out infinite}
+@keyframes hbRoar{0%,100%{transform:rotate(0)}15%{transform:rotate(-10deg) scale(1.07)}35%{transform:rotate(8deg) scale(1.14)}55%{transform:rotate(-7deg) scale(1.1)}78%{transform:rotate(4deg) scale(1.03)}}
+.hb-wormroar{animation:hbRoar 1.2s ease-in-out;transform-box:fill-box;transform-origin:30% 95%}
+@keyframes hbSpit{0%{transform:translate(0,0);opacity:1}100%{transform:translate(var(--sx),var(--sy));opacity:0}}
+.hb-spit{animation:hbSpit .9s ease-out .15s forwards;opacity:0}
+@keyframes hbOrbit{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
+.hb-duckorbit{position:absolute;inset:0;pointer-events:none;animation:hbOrbit 7s linear infinite;z-index:5}
+.hb-duckorbit span{position:absolute;top:3%;left:calc(50% - 13px);font-size:26px;display:inline-block;
+  animation:hbOrbit 7s linear infinite reverse;filter:drop-shadow(0 2px 3px rgba(0,0,0,.5))}`;
 const dispFont = "'Oswald', 'Helvetica Neue', sans-serif";
 const bodyFont = "'Spectral', Georgia, serif";
 
@@ -1349,7 +1370,7 @@ function BuildRow({ label, cost, note, disabled, active, onClick }) {
 }
 
 /* Shai-Hulud rises from the desert. Bless the Maker and His water. */
-function Worm({ cx, cy }) {
+function Worm({ cx, cy, roar }) {
   const segs = [
     { x: -2.7, y: 4.0, r: 2.1 },
     { x: -2.3, y: 2.2, r: 2.0 },
@@ -1365,8 +1386,12 @@ function Worm({ cx, cy }) {
     };
   });
   return (
-    <g className="worm" style={{ pointerEvents: "none" }}>
+    <g className={roar ? "worm hb-wormroar" : "worm"} style={{ pointerEvents: "none" }}>
       <ellipse cx={cx - 2.7} cy={cy + 4.9} rx="3.1" ry="0.9" fill="rgba(96,74,40,.45)" />
+      {roar && [[-4, -6], [-1.5, -7], [1.5, -6.5], [4, -5], [2.5, -8]].map(([sx, sy], i) => (
+        <circle key={i} className="hb-spit" cx={hx} cy={hy} r={0.45 + (i % 3) * 0.15}
+          fill={i % 2 ? "#e8d9ae" : "#bfa76f"} style={{ "--sx": sx + "px", "--sy": sy + "px" }} />
+      ))}
       {segs.map((s, i) => (
         <circle key={i} cx={cx + s.x} cy={cy + s.y} r={s.r}
           fill={i % 2 ? "#c9b37e" : "#bfa76f"} stroke="rgba(62,46,22,.6)" strokeWidth="0.3" />
@@ -1409,9 +1434,25 @@ function Board({ g, sel, onPick, pending }) {
               <line key={v} x1={px} y1={py} x2={GEO.vertexPos[v].x} y2={GEO.vertexPos[v].y}
                 stroke="rgba(224,164,55,.35)" strokeWidth="0.5" strokeDasharray="1.4 1" />
             ))}
-            <circle cx={px} cy={py} r="3.6" fill={C.seaDeep} stroke={pt.type === "any" ? C.gold : RES_COLOR[pt.type]} strokeWidth="0.9" />
+            {pt.type === "any" ? (
+              /* a 3:1 trades anything, so it wears every colour — the old gold
+                 ring kept getting read as the wheat port */
+              <g className="port31">
+                <circle cx={px} cy={py} r="3.6" fill={C.seaDeep} />
+                {MULTI_SET.map((col, k) => {
+                  const a0 = (Math.PI * 2 * k) / MULTI_SET.length - Math.PI / 2;
+                  const a1 = (Math.PI * 2 * (k + 1)) / MULTI_SET.length - Math.PI / 2;
+                  const p0 = [px + 3.6 * Math.cos(a0), py + 3.6 * Math.sin(a0)];
+                  const p1 = [px + 3.6 * Math.cos(a1), py + 3.6 * Math.sin(a1)];
+                  return <path key={k} d={`M ${p0[0]} ${p0[1]} A 3.6 3.6 0 0 1 ${p1[0]} ${p1[1]}`}
+                    fill="none" stroke={col} strokeWidth="0.9" />;
+                })}
+              </g>
+            ) : (
+              <circle cx={px} cy={py} r="3.6" fill={C.seaDeep} stroke={RES_COLOR[pt.type]} strokeWidth="0.9" />
+            )}
             <text x={px} y={py + 1.3} textAnchor="middle" fontSize="3.2" fontFamily={dispFont} fontWeight="600"
-              fill={pt.type === "any" ? C.gold : RES_COLOR[pt.type]}>{pt.type === "any" ? "3:1" : "2:1"}</text>
+              fill={pt.type === "any" ? C.parch : RES_COLOR[pt.type]}>{pt.type === "any" ? "3:1" : "2:1"}</text>
           </g>
         );
       })}
@@ -1422,7 +1463,9 @@ function Board({ g, sel, onPick, pending }) {
           <g key={h.id}>
             <polygon points={pts} fill={HEX_FILL[h.terrain]} stroke="rgba(6,20,25,.55)" strokeWidth="0.6" />
             {h.terrain === "desert" ? (
-              <Worm cx={h.cx} cy={h.cy} />
+              /* keyed per roll so the worm throws its fit exactly once per seven */
+              <Worm key={"worm-" + (g.rolls?.length || 0)} cx={h.cx} cy={h.cy}
+                roar={g.rolls?.length > 0 && g.rolls[g.rolls.length - 1] === 7} />
             ) : b.robber !== h.id && (
               <text x={h.cx} y={h.cy - 4.9} textAnchor="middle" fontSize="4"
                 style={{ pointerEvents: "none" }}>{TERRAIN_ICON[h.terrain]}</text>
@@ -1525,6 +1568,20 @@ export default function App() {
   const [booting, setBooting] = useState(true);
   const [lobby, setLobby] = useState(null);
   const [others, setOthers] = useState([]);
+  const [chatSeen, setChatSeen] = useState(0);
+
+  /* remember how much of the chat this phone has read */
+  useEffect(() => {
+    if (!g) return;
+    const key = "harbor-chatseen-" + g.code;
+    if (modal?.k === "chat") {
+      const n = g.chat?.length || 0;
+      setChatSeen(n);
+      try { window.localStorage.setItem(key, String(n)); } catch { /* best effort */ }
+    } else {
+      try { setChatSeen(+(window.localStorage.getItem(key) || 0)); } catch { /* fine */ }
+    }
+  }, [g, modal]);
   const [pushReady, setPushReady] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [pending, setPending] = useState(null);
@@ -1573,8 +1630,13 @@ export default function App() {
       setNote("Game " + code + " isn't on the server right now — probably a server restart. It comes back the moment anyone who was in the game opens Harbor on their phone, so ask in the chat, then tap the link again.");
       return false;
     }
-    try { adopt(await decodeGame(res.blob)); setHashCode(code); return true; }
-    catch { setNote("Game " + code + " couldn't be read from the server."); return false; }
+    try {
+      const loaded = await decodeGame(res.blob);
+      loaded.seq = Math.max(loaded.seq || 0, res.v || 0); // server's v wins
+      adopt(loaded);
+      setHashCode(code);
+      return true;
+    } catch { setNote("Game " + code + " couldn't be read from the server."); return false; }
   };
 
   /* load from the URL — either a join code or a legacy pass-the-phone blob */
@@ -1737,8 +1799,15 @@ export default function App() {
         body: JSON.stringify({ to: targets, by: actor != null ? pname(cur, actor) : "A spectator" }),
       });
       const j = await r.json();
+      // the duck is a public event: it circles the island on every phone
+      const who = targets.map((t) => pname(cur, t)).join(" and ");
+      const by = actor != null ? pname(cur, actor) : "A spectator";
+      await apply((d) => {
+        d.duckAt = Date.now();
+        say(d, `🦆 ${by} sent a duck after ${who}.`);
+      });
       setNote(j.nosub
-        ? "They haven't turned on notifications — the duck has nowhere to land."
+        ? "🦆 Duck away — they have no notifications on, but the whole island sees it."
         : j.sent.length
           ? "🦆 Duck away — it will quack on their phone."
           : "🦆 A duck is already circling them — one every five hours is plenty.");
@@ -1802,7 +1871,11 @@ export default function App() {
         if (missing) serverPut(now2); // server restarted — reseed it from here
         else if (res && res.blob && res.v > (now2.seq || 0)) {
           cacheBlob(code, res.v, res.blob);
-          try { setG(await decodeGame(res.blob)); } catch { /* skip a bad reply */ }
+          try {
+            const fresh = await decodeGame(res.blob);
+            fresh.seq = Math.max(fresh.seq || 0, res.v || 0); // server's v wins
+            setG(fresh);
+          } catch { /* skip a bad reply */ }
         }
         await new Promise((r) => setTimeout(r, window.HARBOR_POLL_MS || 1200));
       }
@@ -1854,7 +1927,12 @@ export default function App() {
         return true;
       }
       if (r.conflict) {
-        try { latest = await decodeGame(r.conflict.blob); } catch { return false; }
+        try {
+          latest = await decodeGame(r.conflict.blob);
+          // self-heal a v/blob divergence (a client once PUT a bumped v with a
+          // stale blob): the server's v is the version that counts
+          latest.seq = Math.max(latest.seq || 0, r.conflict.v || 0);
+        } catch { return false; }
         setG(latest);
         continue;
       }
@@ -2270,6 +2348,9 @@ export default function App() {
             {!pushReady && (!pushSupported() || window.Notification.permission === "default") && (
               <Btn onClick={enablePush} style={{ padding: "5px 9px", fontSize: 11 }}>🔔</Btn>
             )}
+            <Btn onClick={() => setModal({ k: "chat" })} style={{ padding: "5px 9px", fontSize: 11 }}>
+              Chat{(g.chat?.length || 0) > chatSeen && <span style={{ color: C.gold }}> ●</span>}
+            </Btn>
             <Btn onClick={() => setModal({ k: "rolls" })} style={{ padding: "5px 9px", fontSize: 11 }}>Rolls</Btn>
             <Btn onClick={() => setModal({ k: "log" })} style={{ padding: "5px 9px", fontSize: 11 }}>Log</Btn>
             <Btn onClick={share} style={{ padding: "5px 9px", fontSize: 11 }}>Invite</Btn>
@@ -2322,8 +2403,11 @@ export default function App() {
       )}
 
       <div style={{ position: "relative" }}>
-        <div className={shaking ? "hb-shake" : undefined}>
+        <div className={shaking ? "hb-shake" : undefined} style={{ position: "relative" }}>
         <Board g={g} sel={effSel} onPick={onPick} pending={pendingValid ? pending : null} />
+        {g.duckAt > 0 && now - g.duckAt < 45000 && (
+          <div className="hb-duckorbit"><span>🦆</span></div>
+        )}
       </div>
         {gains && (
           <div key={gains.key} style={{ position: "absolute", top: "38%", left: 0, right: 0, textAlign: "center",
@@ -2588,6 +2672,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
   const [bankGive, setBankGive] = useState(null);
   const [bankWant, setBankWant] = useState(null);
   const [newName, setNewName] = useState(actor != null ? g.players[actor].name : "");
+  const [chatText, setChatText] = useState("");
   const [secretWord, setSecretWord] = useState("");
   useEffect(() => {
     setPick(emptyHand()); setGive(emptyHand()); setWant(emptyHand());
@@ -2699,6 +2784,44 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         <div style={{ marginTop: 10, color: C.parchDim, fontSize: 13, lineHeight: 1.5 }}>
           If you ever open the game on a different phone, the secret word proves the seat is yours.
           Without one, anyone can rejoin as you (it does get announced in the log).
+        </div>
+      </Sheet>
+    );
+  }
+
+  if (modal.k === "chat") {
+    const send = async () => {
+      const m = chatText.trim();
+      if (!m || actor == null) return;
+      const ok = await apply((d) => sendChat(d, actor, m));
+      if (ok) setChatText("");
+    };
+    return (
+      <Sheet title="Ship's chat" onClose={close}
+        footer={actor != null ? (
+          <>
+            <input value={chatText} placeholder="Say it to the whole table…"
+              onChange={(e) => setChatText(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") send(); }}
+              style={{ flex: 1, background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4,
+                padding: "10px", color: C.parch, fontFamily: bodyFont, fontSize: 16 }} />
+            <Btn tone="go" disabled={!chatText.trim()} onClick={send}>Send</Btn>
+          </>
+        ) : undefined}>
+        {(g.chat || []).length === 0 && (
+          <div style={{ color: C.parchDim, fontSize: 14 }}>Nothing said yet. The gulls are listening.</div>
+        )}
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {(g.chat || []).map((c, i) => (
+            <div key={i} style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+              <span style={{ width: 8, height: 8, borderRadius: 2, background: swatchBg(g.players[c.p]?.color ?? 0), flexShrink: 0, alignSelf: "center" }} />
+              <span style={{ fontFamily: dispFont, fontSize: 12, color: c.p === actor ? C.gold : C.parchDim, flexShrink: 0 }}>{pname(g, c.p)}</span>
+              <span style={{ fontSize: 14, lineHeight: 1.4, overflowWrap: "anywhere" }}>{c.m}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop: 12, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
+          The last forty messages travel with the game. Spectators read, settlers speak.
         </div>
       </Sheet>
     );

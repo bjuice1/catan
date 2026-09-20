@@ -12,6 +12,7 @@ import { readFileSync, mkdtempSync } from "fs";
 import { spawn } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
+import { gunzipSync } from "zlib";
 
 const code_js = readFileSync(new URL("../bundle.js", import.meta.url), "utf8");
 const PORT = 34871;
@@ -40,6 +41,23 @@ try {
   console.log(`FATAL: something already listens on ${PORT} — kill it first: lsof -ti :${PORT} | xargs kill`);
   process.exit(1);
 } catch { /* port is free, good */ }
+/* jsdom's style engine normalises or drops colour values, so UI string checks
+   lie; these read the server's stored blob — the actual truth */
+const decodeState = async (c) => {
+  const st = await (await fetch(BASE + "api/g/" + c)).json();
+  const b64 = st.blob.slice(1).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = st.blob[0] === "z" ? gunzipSync(Buffer.from(b64, "base64")) : Buffer.from(b64, "base64");
+  return JSON.parse(raw.toString());
+};
+const waitState = async (c, fn, ms = 6000) => {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    try { if (fn(await decodeState(c))) return true; } catch { /* retry */ }
+    await sleep(150);
+  }
+  return false;
+};
+
 let srv = spawnServer();
 let srvErr = "";
 srv.stderr.on("data", (c) => { srvErr += c; });
@@ -237,7 +255,8 @@ check("every phone still shows a coherent board", phones.every((w) => H(w).inclu
 // the negative-wheat bug: a discard rebased onto a changed hand once pushed
 // a resource below zero — no phone may ever show a negative count
 check("no hand ever goes negative", phones.every((w) => !/>-\d/.test(H(w))));
-check("Shai-Hulud rises from the desert on every phone", phones.every((w) => H(w).includes('class="worm"')));
+check("Shai-Hulud rises from the desert on every phone", phones.every((w) => H(w).includes('class="worm')));
+check("3:1 ports wear the rainbow ring", phones.every((w) => H(w).includes('class="port31"')));
 
 // ---- trade offers travel to the target's phone ----
 {
@@ -395,9 +414,14 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   tap(w, w.document.querySelector('[title="Your record"]'));
   await wait(w, (x) => H(x).includes("Your house colour"));
   tap(w, w.document.querySelector('[title="colour-5"]'));
-  check("a chosen colour syncs to every phone", await wait(phones[0], (x) => H(x).includes("#8e6bb5")));
-  tap(w, w.document.querySelector('[title="colour-99"]'));
-  check("multicolour paints the whole set", await wait(phones[0], (x) => H(x).includes("linear-gradient")));
+  check("a chosen colour syncs through the server", await waitState(code, (o) => o.co?.[2] === 5));
+  // the in-flight guard drops a tap made during another apply — retap like a human
+  let multiOk = false;
+  for (let t = 0; t < 3 && !multiOk; t++) {
+    tap(w, w.document.querySelector('[title="colour-99"]'));
+    multiOk = await waitState(code, (o) => o.co?.[2] === 99, 2500);
+  }
+  check("multicolour lands in the game state", multiOk);
   click(w, "×");
   await sleep(150);
 }
@@ -494,6 +518,36 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   if (waiter) {
     click(waiter, "Send a duck");
     check("the duck button reports back", await wait(waiter, (x) => /duck|land/i.test(H(x)), 4000));
+    check("a duck circles the island on the sender's phone",
+      await wait(waiter, (x) => H(x).includes("hb-duckorbit"), 4000));
+    const bystander = phones.find((w) => w !== waiter);
+    check("the duck circles on every phone",
+      await wait(bystander, (x) => H(x).includes("hb-duckorbit"), 5000));
+  }
+
+  // ---- ship's chat ----
+  {
+    click(A, "Chat");
+    await wait(A, (x) => H(x).includes("Ship's chat"));
+    const box = [...A.document.querySelectorAll("input")].find((el) => el.placeholder.includes("whole table"));
+    setInput(A, box, "ahoy the harbor");
+    await sleep(80);
+    // exact match: plain btn("Send") would hit "Send a duck" in the strip;
+    // retap if the in-flight guard swallowed it
+    // NOTE: the push test above deliberately PUT a bumped v around a stale
+    // blob — the divergence that once deadlocked every later write. Chat
+    // landing here proves clients self-heal from it (server's v wins).
+    let sentChat = false;
+    for (let t = 0; t < 3 && !sentChat; t++) {
+      tap(A, [...A.document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Send"));
+      sentChat = await waitState(code, (o) => (o.cm || []).some(([, m]) => m === "ahoy the harbor"), 2500);
+    }
+    check("a chat message lands in the game state (post-divergence self-heal)", sentChat);
+    click(A, "×");
+    click(phones[1], "Chat");
+    check("a chat message reaches the other phones",
+      await wait(phones[1], (x) => H(x).includes("ahoy the harbor"), 5000));
+    click(phones[1], "×");
   }
 }
 
