@@ -410,6 +410,7 @@ function reassignColors(g) {
 }
 
 function sendChat(g, p, text) {
+  if (g.winner != null) return false; // the chat died with the game
   const m = String(text || "").trim().slice(0, 140);
   if (!m || p == null) return false;
   g.chat = [...(g.chat || []), { p, m }].slice(-40);
@@ -831,6 +832,7 @@ function endTurn(g) {
     g.winner = p;
     g.phase = "over";
     say(g, `${pname(g, p)} reached ${winAt(g)} points and wins.`);
+    g.chat = []; // what was said at sea, stays at sea
     return g;
   }
   /* play proceeds in the drafted order, not seat order */
@@ -1211,8 +1213,10 @@ const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght
 .hb-spit{animation:hbSpit .9s ease-out .15s forwards;opacity:0}
 @keyframes hbOrbit{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
 .hb-duckorbit{position:absolute;inset:0;pointer-events:none;animation:hbOrbit 7s linear infinite;z-index:5}
-.hb-duckorbit span{position:absolute;top:3%;left:calc(50% - 13px);font-size:26px;display:inline-block;
-  animation:hbOrbit 7s linear infinite reverse;filter:drop-shadow(0 2px 3px rgba(0,0,0,.5))}`;
+.hb-duckorbit>span{position:absolute;top:3%;left:calc(50% - 13px);font-size:26px;display:inline-block;
+  animation:hbOrbit 7s linear infinite reverse;filter:drop-shadow(0 2px 3px rgba(0,0,0,.5))}
+@keyframes hbFlap{0%{transform:scaleY(1) translateY(0)}100%{transform:scaleY(.68) translateY(-4px)}}
+.hb-flap{display:inline-block;animation:hbFlap .24s ease-in-out infinite alternate;transform-origin:50% 80%}`;
 const dispFont = "'Oswald', 'Helvetica Neue', sans-serif";
 const bodyFont = "'Spectral', Georgia, serif";
 
@@ -1805,7 +1809,7 @@ export default function App() {
       await apply((d) => {
         d.duckAt = Date.now();
         say(d, `🦆 ${by} sent a duck after ${who}.`);
-      });
+      }, true);
       setNote(j.nosub
         ? "🦆 Duck away — they have no notifications on, but the whole island sees it."
         : j.sent.length
@@ -1887,16 +1891,16 @@ export default function App() {
      One at a time: a double-tap during the network round trip must not
      replay the action onto the already-updated state. */
   const applyBusy = useRef(false);
-  const apply = async (fn) => {
+  const apply = async (fn, social = false) => {
     if (applyBusy.current) return false;
     applyBusy.current = true;
     try {
-      return await applyInner(fn);
+      return await applyInner(fn, social);
     } finally {
       applyBusy.current = false;
     }
   };
-  const applyInner = async (fn) => {
+  const applyInner = async (fn, social) => {
     let latest = gRef.current;
     for (let attempt = 0; attempt < 3; attempt++) {
       if (latest && clientOutdated(latest)) {
@@ -1912,9 +1916,11 @@ export default function App() {
         return false;
       }
       const inSetup = d.phase === "setupTown" || d.phase === "setupRoad";
-      if (!inSetup && d.phase !== "over" && scoreFor(d, d.turn, true) >= winAt(d)) {
+      // social actions (chat, renames, colours, ducks) can never win a game
+      if (!social && !inSetup && d.phase !== "over" && scoreFor(d, d.turn, true) >= winAt(d)) {
         d.winner = d.turn; d.phase = "over";
         say(d, `${pname(d, d.turn)} reached ${winAt(d)} points and wins.`);
+        d.chat = []; // what was said at sea, stays at sea
       }
       d.seq = (d.seq || 0) + 1;
       const r = await serverPut(d, seat);
@@ -2349,7 +2355,9 @@ export default function App() {
               <Btn onClick={enablePush} style={{ padding: "5px 9px", fontSize: 11 }}>🔔</Btn>
             )}
             <Btn onClick={() => setModal({ k: "chat" })} style={{ padding: "5px 9px", fontSize: 11 }}>
-              Chat{(g.chat?.length || 0) > chatSeen && <span style={{ color: C.gold }}> ●</span>}
+              Chat{(g.chat?.length || 0) > chatSeen && (
+                <span title="chat-unread" style={{ color: C.gold, fontFamily: dispFont }}> {Math.min(40, (g.chat?.length || 0) - chatSeen)}</span>
+              )}
             </Btn>
             <Btn onClick={() => setModal({ k: "rolls" })} style={{ padding: "5px 9px", fontSize: 11 }}>Rolls</Btn>
             <Btn onClick={() => setModal({ k: "log" })} style={{ padding: "5px 9px", fontSize: 11 }}>Log</Btn>
@@ -2406,7 +2414,7 @@ export default function App() {
         <div className={shaking ? "hb-shake" : undefined} style={{ position: "relative" }}>
         <Board g={g} sel={effSel} onPick={onPick} pending={pendingValid ? pending : null} />
         {g.duckAt > 0 && now - g.duckAt < 45000 && (
-          <div className="hb-duckorbit"><span>🦆</span></div>
+          <div className="hb-duckorbit"><span><span className="hb-flap">🦆</span></span></div>
         )}
       </div>
         {gains && (
@@ -2673,6 +2681,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
   const [bankWant, setBankWant] = useState(null);
   const [newName, setNewName] = useState(actor != null ? g.players[actor].name : "");
   const [chatText, setChatText] = useState("");
+  const [shooting, setShooting] = useState(false);
   const [secretWord, setSecretWord] = useState("");
   useEffect(() => {
     setPick(emptyHand()); setGive(emptyHand()); setWant(emptyHand());
@@ -2769,7 +2778,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
                 d.players[actor].name = nm;
               }
               if (sw) d.players[actor].lock = hashWord(sw);
-            });
+            }, true);
             close();
           }}>Save</Btn>}>
         <Eyebrow>Name</Eyebrow>
@@ -2793,35 +2802,92 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
     const send = async () => {
       const m = chatText.trim();
       if (!m || actor == null) return;
-      const ok = await apply((d) => sendChat(d, actor, m));
+      const ok = await apply((d) => sendChat(d, actor, m), true);
       if (ok) setChatText("");
     };
+    const canShoot = actor != null && typeof window.FileReader === "function" &&
+      (() => { try { return !!document.createElement("canvas").getContext("2d"); } catch { return false; } })();
+    const shoot = async (file) => {
+      if (!file) return;
+      setShooting(true);
+      try {
+        const dataUrl = await new Promise((ok, no) => {
+          const fr = new window.FileReader();
+          fr.onload = () => ok(fr.result); fr.onerror = no; fr.readAsDataURL(file);
+        });
+        const img = await new Promise((ok, no) => {
+          const el = new window.Image();
+          el.onload = () => ok(el); el.onerror = no; el.src = dataUrl;
+        });
+        const scale = Math.min(1, 900 / Math.max(img.width, img.height));
+        const cv = document.createElement("canvas");
+        cv.width = Math.round(img.width * scale); cv.height = Math.round(img.height * scale);
+        cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+        const blob = await new Promise((ok) => cv.toBlob(ok, "image/jpeg", 0.72));
+        const r = await fetch(new URL("/api/photo/" + g.code, window.location.href), {
+          method: "POST", headers: { "Content-Type": "image/jpeg" }, body: blob,
+        });
+        if (r.status === 429) { setNote("The album's full for this game — it empties with the next one."); return; }
+        const { id } = await r.json();
+        await apply((d) => sendChat(d, actor, "[[img:" + id + "]]"), true);
+      } catch { setNote("That photo didn't survive the trip — try another."); }
+      finally { setShooting(false); }
+    };
+    const isEmojiOnly = (m) => [...m.replace(/\s/g, "")].length <= 3 && !/[A-Za-z0-9]/.test(m) &&
+      /^[\p{Extended_Pictographic}‍️\s]+$/u.test(m);
     return (
       <Sheet title="Ship's chat" onClose={close}
-        footer={actor != null ? (
+        footer={actor != null && g.winner == null ? (
           <>
+            {canShoot && (
+              <label style={{ display: "inline-flex", alignItems: "center", cursor: "pointer", padding: "8px 10px",
+                border: `1px solid ${C.line}`, borderRadius: 5, background: "rgba(255,255,255,.05)", fontSize: 17 }}>
+                {shooting ? "…" : "📷"}
+                <input type="file" accept="image/*" hidden disabled={shooting}
+                  onChange={(e) => { shoot(e.target.files[0]); e.target.value = ""; }} />
+              </label>
+            )}
             <input value={chatText} placeholder="Say it to the whole table…"
               onChange={(e) => setChatText(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") send(); }}
-              style={{ flex: 1, background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4,
+              style={{ flex: 1, minWidth: 0, background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4,
                 padding: "10px", color: C.parch, fontFamily: bodyFont, fontSize: 16 }} />
             <Btn tone="go" disabled={!chatText.trim()} onClick={send}>Send</Btn>
           </>
         ) : undefined}>
         {(g.chat || []).length === 0 && (
-          <div style={{ color: C.parchDim, fontSize: 14 }}>Nothing said yet. The gulls are listening.</div>
+          <div style={{ color: C.parchDim, fontSize: 14 }}>
+            {g.winner != null ? "The gulls ate the chat when the anchor dropped." : "Nothing said yet. The gulls are listening."}
+          </div>
         )}
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          {(g.chat || []).map((c, i) => (
-            <div key={i} style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
-              <span style={{ width: 8, height: 8, borderRadius: 2, background: swatchBg(g.players[c.p]?.color ?? 0), flexShrink: 0, alignSelf: "center" }} />
-              <span style={{ fontFamily: dispFont, fontSize: 12, color: c.p === actor ? C.gold : C.parchDim, flexShrink: 0 }}>{pname(g, c.p)}</span>
-              <span style={{ fontSize: 14, lineHeight: 1.4, overflowWrap: "anywhere" }}>{c.m}</span>
-            </div>
-          ))}
+          {(g.chat || []).map((c, i) => {
+            const img = c.m.match(/^\[\[img:([a-z0-9]{6,16})\]\]$/);
+            return (
+              <div key={i} style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+                <span style={{ width: 8, height: 8, borderRadius: 2, background: swatchBg(g.players[c.p]?.color ?? 0), flexShrink: 0, alignSelf: img ? "flex-start" : "center", marginTop: img ? 6 : 0 }} />
+                <span style={{ fontFamily: dispFont, fontSize: 12, color: c.p === actor ? C.gold : C.parchDim, flexShrink: 0 }}>{pname(g, c.p)}</span>
+                {img ? (
+                  <img src={"/api/photo/" + g.code + "/" + img[1]} alt="chat photo"
+                    style={{ maxWidth: "78%", borderRadius: 8, border: `1px solid ${C.line}` }} />
+                ) : (
+                  <span style={{ fontSize: isEmojiOnly(c.m) ? 34 : 14, lineHeight: 1.4, overflowWrap: "anywhere" }}>{c.m}</span>
+                )}
+              </div>
+            );
+          })}
         </div>
+        {actor != null && g.winner == null && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 }}>
+            {["🦆", "🎲", "😂", "😭", "🔥", "🐑", "🧱", "🤝", "🏴‍☠️"].map((e) => (
+              <button key={e} title={"emoji-" + e} onClick={() => apply((d) => sendChat(d, actor, e), true)}
+                style={{ background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 5,
+                  padding: "5px 9px", fontSize: 18, cursor: "pointer" }}>{e}</button>
+            ))}
+          </div>
+        )}
         <div style={{ marginTop: 12, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
-          The last forty messages travel with the game. Spectators read, settlers speak.
+          The last forty messages travel with the game; photos live on the ship. Everything is burned when someone wins.
         </div>
       </Sheet>
     );
@@ -2911,7 +2977,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
                 const cur = g.players[who].color === ci;
                 return (
                   <button key={ci} title={"colour-" + ci} disabled={taken}
-                    onClick={() => apply((d) => chooseColor(d, who, ci))}
+                    onClick={() => apply((d) => chooseColor(d, who, ci), true)}
                     style={{ width: 32, height: 32, borderRadius: 6, padding: 0,
                       background: swatchBg(ci), opacity: taken ? 0.22 : 1,
                       cursor: taken ? "default" : "pointer",

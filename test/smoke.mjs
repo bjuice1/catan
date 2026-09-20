@@ -520,6 +520,7 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     check("the duck button reports back", await wait(waiter, (x) => /duck|land/i.test(H(x)), 4000));
     check("a duck circles the island on the sender's phone",
       await wait(waiter, (x) => H(x).includes("hb-duckorbit"), 4000));
+    check("the duck flaps its wings", H(waiter).includes("hb-flap"));
     const bystander = phones.find((w) => w !== waiter);
     check("the duck circles on every phone",
       await wait(bystander, (x) => H(x).includes("hb-duckorbit"), 5000));
@@ -544,11 +545,35 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     }
     check("a chat message lands in the game state (post-divergence self-heal)", sentChat);
     click(A, "×");
+    const badge = await wait(phones[2], (x) => !!x.document.querySelector('[title="chat-unread"]'), 4000);
+    check("unopened phones show an unread count",
+      badge && +phones[2].document.querySelector('[title="chat-unread"]').textContent >= 1);
     click(phones[1], "Chat");
     check("a chat message reaches the other phones",
       await wait(phones[1], (x) => H(x).includes("ahoy the harbor"), 5000));
     click(phones[1], "×");
   }
+}
+
+// ---- the photo album: uploads live outside the blob, burn on game over ----
+{
+  await fetch(BASE + "api/g/PHTO", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ v: 1, blob: "utest" }),
+  });
+  const fakeJpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(500, 7)]);
+  const up = await (await fetch(BASE + "api/photo/PHTO", {
+    method: "POST", headers: { "Content-Type": "image/jpeg" }, body: fakeJpeg,
+  })).json();
+  check("a chat photo uploads and gets an id", typeof up.id === "string" && up.id.length >= 6);
+  const got = await fetch(BASE + "api/photo/PHTO/" + up.id);
+  check("the photo serves back as a jpeg", got.ok && got.headers.get("content-type") === "image/jpeg");
+  await fetch(BASE + "api/g/PHTO", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ v: 2, blob: "utest", meta: { by: 0, turn: 0, tn: 1, discard: [], winner: 0 } }),
+  });
+  const gone = await fetch(BASE + "api/photo/PHTO/" + up.id);
+  check("the album burns when the game ends", gone.status === 404);
 }
 
 // ---- the lobby: the app icon opens a list of your games ----
@@ -714,6 +739,23 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   const pair = [P, Q];
   await Promise.all(pair.map((w) => wait(w, (x) => H(x).includes("<svg"), 6000)));
 
+  // say something first, via the quick-emoji bar — the win must erase it.
+  // (during setup: at First-to-2 the game is over the moment setup ends)
+  {
+    click(P, "Chat");
+    await wait(P, (x) => H(x).includes("Ship's chat"));
+    let quacked = false;
+    for (let t = 0; t < 3 && !quacked; t++) {
+      const eb = P.document.querySelector('[title="emoji-🦆"]');
+      if (!eb) break;
+      tap(P, eb);
+      quacked = await waitState(codeW, (o) => (o.cm || []).some(([, m]) => m === "🦆"), 2500);
+    }
+    check("the quick-emoji bar sends a duck to the chat", quacked);
+    click(P, "×");
+    await sleep(150);
+  }
+
   // setup
   for (let s = 0; s < 4; s++) {
     const w = await activePlacer(pair);
@@ -733,6 +775,7 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   if (roller) { click(roller, "Roll the dice"); await sleep(400); }
   const won = (await Promise.all(pair.map((w) => wait(w, (x) => H(x).includes("WINS"), 6000)))).every(Boolean);
   check("a win ends the game on every phone", won);
+  check("the chat is burned when someone wins", await waitState(codeW, (o) => (o.cm || []).length === 0));
 
   if (won) {
     // both phones offer the rematch — the banner names the actual winner

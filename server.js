@@ -81,6 +81,24 @@ const readBody = (req, cb) => {
   req.on("data", (c) => { body += c; if (body.length > MAX_BLOB + 4000) req.destroy(); });
   req.on("end", () => cb(body));
 };
+const readBinary = (req, cap, cb) => {
+  const chunks = [];
+  let size = 0;
+  req.on("data", (c) => { size += c.length; if (size > cap) req.destroy(); else chunks.push(c); });
+  req.on("end", () => cb(Buffer.concat(chunks)));
+};
+
+/* ---- the photo album ----
+   Chat photos never ride in the state blob (20KB cap, synced constantly);
+   they live as files per game and chat messages carry only an id. The whole
+   album burns when the game ends. */
+const PHOTO_DIR = path.join(DATA_DIR, "photos");
+const MAX_PHOTO = 400 * 1024;
+const MAX_ALBUM = 60;
+const photoDir = (code) => path.join(PHOTO_DIR, code);
+function burnAlbum(code) {
+  try { fs.rmSync(photoDir(code), { recursive: true, force: true }); } catch { /* nothing to burn */ }
+}
 
 function notify(code, seat, payload, tag) {
   const gameSubs = subs.get(code);
@@ -188,11 +206,13 @@ http.createServer((req, res) => {
           games.delete(oldest[0]);
           subs.delete(oldest[0]);
           pinged.delete(oldest[0]);
+          burnAlbum(oldest[0]);
         }
         games.set(code, { v, blob, t: Date.now(), meta: meta && typeof meta === "object" ? meta : null });
         persist();
         flushWaiters(code);
         // the client tells us who is up; the server just delivers the nudge
+        if (meta && typeof meta === "object" && meta.winner != null) burnAlbum(code);
         if (meta && typeof meta === "object") {
           const { turn, tn, by, discard, winner, tradeTo, rematch } = meta;
           if (typeof rematch === "string" && rematch) {
@@ -226,6 +246,30 @@ http.createServer((req, res) => {
       return;
     }
     return json(res, 405, { error: "method not allowed" });
+  }
+
+  /* chat photos: POST raw jpeg, GET it back by id — never part of the blob */
+  const ph = u.pathname.match(/^\/api\/photo\/([A-Z0-9]{4,8})(?:\/([a-z0-9]{6,16}))?$/);
+  if (ph && req.method === "POST" && !ph[2]) {
+    readBinary(req, MAX_PHOTO, (buf) => {
+      if (!buf.length) return json(res, 400, { error: "empty" });
+      const dir = photoDir(ph[1]);
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        if (fs.readdirSync(dir).length >= MAX_ALBUM) return json(res, 429, { full: true });
+        const id = Array.from({ length: 10 }, () => "abcdefghjkmnpqrstuvwxyz23456789"[Math.floor(Math.random() * 31)]).join("");
+        fs.writeFileSync(path.join(dir, id + ".jpg"), buf);
+        return json(res, 200, { id });
+      } catch (e) { return json(res, 500, { error: e.message }); }
+    });
+    return;
+  }
+  if (ph && req.method === "GET" && ph[2]) {
+    try {
+      const img = fs.readFileSync(path.join(photoDir(ph[1]), ph[2] + ".jpg"));
+      res.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "public, max-age=31536000, immutable" });
+      return res.end(img);
+    } catch { return json(res, 404, { error: "gone" }); }
   }
 
   /* a manual poke: one duck per target per 5 hours, however many senders */
