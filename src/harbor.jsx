@@ -1244,8 +1244,8 @@ const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght
 .hb-spit{animation:hbSpit .9s ease-out .15s forwards;opacity:0}
 @keyframes hbFlap{0%{transform:scaleY(1) translateY(0)}100%{transform:scaleY(.68) translateY(-4px)}}
 .hb-flap{display:inline-block;animation:hbFlap .24s ease-in-out infinite alternate;transform-origin:50% 80%}
-@keyframes hbBlinkQ{0%,55%{opacity:1}56%,100%{opacity:0}}
-.hb-quack{animation:hbBlinkQ 7.5s steps(1,end) infinite}`;
+@keyframes hbBlinkQ{0%,49%{opacity:1}50%,100%{opacity:0}}
+.hb-quack{animation:hbBlinkQ 3s steps(1,end) infinite}`;
 const dispFont = "'Oswald', 'Helvetica Neue', sans-serif";
 const bodyFont = "'Spectral', Georgia, serif";
 
@@ -1861,14 +1861,14 @@ export default function App() {
   const lastQuack = useRef(0);
   useEffect(() => {
     if (!g || g.winner != null || !g.duckAt) return;
-    if (g.duckAt !== lastQuack.current && Date.now() - g.duckAt < 120000) {
+    if (g.duckAt !== lastQuack.current && Date.now() - g.duckAt < 45000) {
       lastQuack.current = g.duckAt;
       playQuack();
     }
     const mine = seat != null && (g.duckTo || []).includes(seat) &&
       (g.turn === seat || (g.pendingDiscard[seat] || 0) > 0);
     if (!mine) return;
-    const id = setInterval(playQuack, 7500);
+    const id = setInterval(playQuack, 3000);
     return () => clearInterval(id);
   }, [g, seat]);
 
@@ -2317,7 +2317,7 @@ export default function App() {
 
   /* ---- derived ---- */
   const actor = seat; // null when spectating — every action below is gated on it
-  const duckFresh = g.duckAt > 0 && now - g.duckAt < 120000 && g.winner == null;
+  const duckFresh = g.duckAt > 0 && now - g.duckAt < 45000 && g.winner == null;
   const quackedMe = actor != null && g.winner == null && g.duckAt > 0 &&
     (g.duckTo || []).includes(actor) &&
     (g.turn === actor || (g.pendingDiscard[actor] || 0) > 0);
