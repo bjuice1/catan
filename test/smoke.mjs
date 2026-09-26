@@ -365,6 +365,7 @@ check("recent rolls strip shows on a synced phone", H(phones[1]).includes("LAST 
   click(phones[1], "Rolls");
   const opened = await wait(phones[1], (x) => H(x).includes("Hot and cold"));
   check("rolls sheet shows the hot and cold board", opened && / — \d+ so far/.test(H(phones[1])));
+  check("rolls sheet counts each player's sevens", H(phones[1]).includes("Sevens rolled this game"));
   click(phones[1], "×");
   await sleep(150);
   // tapping an opponent's score card opens their public record
@@ -518,12 +519,12 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   if (waiter) {
     click(waiter, "Send a duck");
     check("the duck button reports back", await wait(waiter, (x) => /duck|land/i.test(H(x)), 4000));
-    check("a duck circles the island on the sender's phone",
-      await wait(waiter, (x) => H(x).includes("hb-duckorbit"), 4000));
+    check("the corner duck quacks on the sender's phone",
+      await wait(waiter, (x) => H(x).includes("hb-quack"), 4000));
     check("the duck flaps its wings", H(waiter).includes("hb-flap"));
     const bystander = phones.find((w) => w !== waiter);
-    check("the duck circles on every phone",
-      await wait(bystander, (x) => H(x).includes("hb-duckorbit"), 5000));
+    check("the corner duck quacks on every phone",
+      await wait(bystander, (x) => H(x).includes("hb-quack"), 5000));
   }
 
   // ---- ship's chat ----
@@ -629,10 +630,12 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   await sleep(80);
   click(E, "Friendly robber");
   await sleep(80);
+  click(E, "Road-splitting towns");
+  await sleep(80);
   click(E, "Create game");
   await wait(E, (x) => H(x).includes("aboard"));
   const code2 = (H(E).match(/Game ([A-Z0-9]{4})/) || [])[1];
-  check("house rules show in the lobby", H(E).includes("First to 8") && H(E).includes("friendly robber"));
+  check("house rules show in the lobby", H(E).includes("First to 8") && H(E).includes("friendly robber") && H(E).includes("road-splitting towns"));
 
   const F = boot(BASE + "#g=" + code2);
   await wait(F, (x) => H(x).includes("pick your seat"));

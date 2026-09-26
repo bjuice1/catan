@@ -206,11 +206,15 @@ const vertexNeighborVerts = (v) =>
 function canPlaceSettlement(g, v, p, setup) {
   if (g.buildings[v]) return false;
   if (vertexNeighborVerts(v).some((n) => g.buildings[n])) return false;
-  /* house rule: no towns mid-run of a single colour's road — a corner where
-     two or more roads meet is only buildable when different colours contest
-     it. (Player 0 is falsy: compare against undefined, never truthiness.) */
-  const roadOwners = (GEO.vertexEdges[v] || []).filter((e) => g.roads[e] !== undefined).map((e) => g.roads[e]);
-  if (roadOwners.length >= 2 && new Set(roadOwners).size === 1) return false;
+  /* house rule (off when rules.classic): no towns mid-run of a single
+     colour's road — a corner where two or more roads meet is only buildable
+     when different colours contest it. Classic Catan allows it, which is how
+     you cut an opponent's longest road. (Player 0 is falsy: compare against
+     undefined, never truthiness.) */
+  if (!g.rules?.classic) {
+    const roadOwners = (GEO.vertexEdges[v] || []).filter((e) => g.roads[e] !== undefined).map((e) => g.roads[e]);
+    if (roadOwners.length >= 2 && new Set(roadOwners).size === 1) return false;
+  }
   if (setup) return true;
   return (GEO.vertexEdges[v] || []).some((e) => g.roads[e] === p);
 }
@@ -354,8 +358,9 @@ function newGame(code, names) {
     rolls: [],
     sevenAt: 0,
     duckAt: 0,
+    duckTo: [],
     chat: [], // {p, m} — last 40 messages ride in the blob
-    rules: { win: 10, friendly: false },
+    rules: { win: 10, friendly: false, classic: false },
     stats: names.map(() => [0, 0, 0]),       // gained, stolen, sevens (this game)
     seriesStats: names.map(() => [0, 0, 0]), // same, summed over finished games
     phase: "lobby",
@@ -903,6 +908,7 @@ function pack(g) {
     rl: g.rolls.join(","),
     sa: g.sevenAt || 0,
     da: g.duckAt || 0,
+    dt: g.duckTo || [],
     cm: (g.chat || []).map((c) => [c.p, c.m]),
     tr: g.trade ? [g.trade.from, g.trade.to, ...RES.map((r) => g.trade.give[r] || 0), ...RES.map((r) => g.trade.want[r] || 0), g.trade.at || 0] : 0,
     ph: PH_LIST.indexOf(g.phase),
@@ -920,7 +926,7 @@ function pack(g) {
     hi: (g.history || []).map((h) => h.w + ":" + h.o),
     gn: g.gameNo || 1,
     av: Math.max(g.appV || 0, APP_V),
-    ru: [g.rules?.win || 10, g.rules?.friendly ? 1 : 0],
+    ru: [g.rules?.win || 10, g.rules?.friendly ? 1 : 0, g.rules?.classic ? 1 : 0],
     st: g.stats || g.players.map(() => [0, 0, 0]),
     ss: g.seriesStats || g.players.map(() => [0, 0, 0]),
     lg: g.log.slice(-30).map((l) => l.m),
@@ -972,6 +978,7 @@ function unpack(o) {
     rolls: o.rl ? o.rl.split(",").map(Number) : [],
     sevenAt: o.sa || 0,
     duckAt: o.da || 0,
+    duckTo: o.dt || [],
     chat: (o.cm || []).map(([p, m]) => ({ p, m })),
     phase: PH_LIST[o.ph],
     setupOrder: order, setupIdx: o.si,
@@ -994,7 +1001,7 @@ function unpack(o) {
     history: (o.hi || []).map((s) => { const [w, ord] = s.split(":"); return { w: +w, o: ord }; }),
     gameNo: o.gn || 1,
     appV: o.av || 0,
-    rules: o.ru ? { win: o.ru[0] || 10, friendly: !!o.ru[1] } : { win: 10, friendly: false },
+    rules: o.ru ? { win: o.ru[0] || 10, friendly: !!o.ru[1], classic: !!o.ru[2] } : { win: 10, friendly: false, classic: false },
     stats: o.st || o.n.map(() => [0, 0, 0]),
     seriesStats: o.ss || o.n.map(() => [0, 0, 0]),
     log: o.lg.map((m) => ({ t: 0, m })),
@@ -1111,6 +1118,30 @@ function makeTok(code) {
   return t;
 }
 
+/* a synthesised quack: two short falling honks. Best-effort — iOS only lets
+   audio out after the person has tapped something, and jsdom has no ears. */
+function playQuack() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    window.__hbAC = window.__hbAC || new AC();
+    const ctx = window.__hbAC;
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    const t0 = ctx.currentTime;
+    [[320, 0, 0.12], [260, 0.15, 0.2]].forEach(([f, dt, dur]) => {
+      const o = ctx.createOscillator(), gn = ctx.createGain();
+      o.type = "sawtooth";
+      o.frequency.setValueAtTime(f, t0 + dt);
+      o.frequency.exponentialRampToValueAtTime(f * 0.55, t0 + dt + dur);
+      gn.gain.setValueAtTime(0.0001, t0 + dt);
+      gn.gain.exponentialRampToValueAtTime(0.22, t0 + dt + 0.02);
+      gn.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + dur);
+      o.connect(gn); gn.connect(ctx.destination);
+      o.start(t0 + dt); o.stop(t0 + dt + dur + 0.03);
+    });
+  } catch { /* silent pond */ }
+}
+
 const seatKey = (code) => "harbor-seat-" + code;
 function knownSeat(code) {
   try { const s = window.localStorage.getItem(seatKey(code)); return s == null ? null : +s; } catch { return null; }
@@ -1211,12 +1242,10 @@ const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght
 .hb-wormroar{animation:hbRoar 1.2s ease-in-out;transform-box:fill-box;transform-origin:30% 95%}
 @keyframes hbSpit{0%{transform:translate(0,0);opacity:1}100%{transform:translate(var(--sx),var(--sy));opacity:0}}
 .hb-spit{animation:hbSpit .9s ease-out .15s forwards;opacity:0}
-@keyframes hbOrbit{0%{transform:rotate(0)}100%{transform:rotate(360deg)}}
-.hb-duckorbit{position:absolute;inset:0;pointer-events:none;animation:hbOrbit 7s linear infinite;z-index:5}
-.hb-duckorbit>span{position:absolute;top:3%;left:calc(50% - 13px);font-size:26px;display:inline-block;
-  animation:hbOrbit 7s linear infinite reverse;filter:drop-shadow(0 2px 3px rgba(0,0,0,.5))}
 @keyframes hbFlap{0%{transform:scaleY(1) translateY(0)}100%{transform:scaleY(.68) translateY(-4px)}}
-.hb-flap{display:inline-block;animation:hbFlap .24s ease-in-out infinite alternate;transform-origin:50% 80%}`;
+.hb-flap{display:inline-block;animation:hbFlap .24s ease-in-out infinite alternate;transform-origin:50% 80%}
+@keyframes hbBlinkQ{0%,49%{opacity:1}50%,100%{opacity:0}}
+.hb-quack{animation:hbBlinkQ 3s steps(1,end) infinite}`;
 const dispFont = "'Oswald', 'Helvetica Neue', sans-serif";
 const bodyFont = "'Spectral', Georgia, serif";
 
@@ -1564,6 +1593,7 @@ export default function App() {
   const [myCount, setMyCount] = useState(4);
   const [myWin, setMyWin] = useState(10);
   const [myFriendly, setMyFriendly] = useState(false);
+  const [myClassic, setMyClassic] = useState(false);
   const [spectate, setSpectate] = useState(false);
   const [claimName, setClaimName] = useState("");
   const [joinCode, setJoinCode] = useState("");
@@ -1808,6 +1838,7 @@ export default function App() {
       const by = actor != null ? pname(cur, actor) : "A spectator";
       await apply((d) => {
         d.duckAt = Date.now();
+        d.duckTo = targets;
         say(d, `🦆 ${by} sent a duck after ${who}.`);
       }, true);
       setNote(j.nosub
@@ -1824,6 +1855,22 @@ export default function App() {
     setSeat(knownSeat(code));
     await loadByCode(code);
   };
+
+  /* quacks: one for everyone when a duck lands, and every blink for the
+     target until they finally move */
+  const lastQuack = useRef(0);
+  useEffect(() => {
+    if (!g || g.winner != null || !g.duckAt) return;
+    if (g.duckAt !== lastQuack.current && Date.now() - g.duckAt < 45000) {
+      lastQuack.current = g.duckAt;
+      playQuack();
+    }
+    const mine = seat != null && (g.duckTo || []).includes(seat) &&
+      (g.turn === seat || (g.pendingDiscard[seat] || 0) > 0);
+    if (!mine) return;
+    const id = setInterval(playQuack, 3000);
+    return () => clearInterval(id);
+  }, [g, seat]);
 
   /* keep this phone's push subscription registered for the current game */
   useEffect(() => {
@@ -1966,7 +2013,7 @@ export default function App() {
     let game = null, r = null;
     for (let tries = 0; tries < 5; tries++) {
       game = newGame(makeCode4(), seats);
-      game.rules = { win: myWin, friendly: myFriendly };
+      game.rules = { win: myWin, friendly: myFriendly, classic: myClassic };
       game.players[0].claimed = true;
       const t = makeTok(game.code);
       game.players[0].tok = t;
@@ -2111,6 +2158,12 @@ export default function App() {
               borderRadius: 5, padding: "9px 12px", fontFamily: dispFont, fontSize: 13, cursor: "pointer", marginBottom: 12 }}>
               Friendly robber {myFriendly ? "— on" : "— off"} <span style={{ textTransform: "none", fontFamily: bodyFont, fontSize: 12 }}>(no robbing anyone below 3 points)</span>
             </button>
+            <button onClick={() => setMyClassic(!myClassic)} style={{ width: "100%", textAlign: "left",
+              background: myClassic ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+              border: `1px solid ${myClassic ? C.gold : C.line}`, color: myClassic ? C.gold : C.parchDim,
+              borderRadius: 5, padding: "9px 12px", fontFamily: dispFont, fontSize: 13, cursor: "pointer", marginBottom: 12 }}>
+              Road-splitting towns {myClassic ? "— on" : "— off"} <span style={{ textTransform: "none", fontFamily: bodyFont, fontSize: 12 }}>(classic Catan: a town may land mid-road and cut a longest road)</span>
+            </button>
             <Btn tone="go" onClick={create} style={{ width: "100%" }}>Create game</Btn>
           </div>
           <div style={{ marginTop: 14, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
@@ -2219,7 +2272,7 @@ export default function App() {
             Game {g.code} — the island appears when everyone's aboard.
           </div>
           <div style={{ color: C.gold, marginTop: 6, fontSize: 13, fontFamily: dispFont, letterSpacing: ".1em", textTransform: "uppercase" }}>
-            First to {g.rules?.win || 10}{g.rules?.friendly ? " · friendly robber" : ""}
+            First to {g.rules?.win || 10}{g.rules?.friendly ? " · friendly robber" : ""}{g.rules?.classic ? " · road-splitting towns" : ""}
           </div>
           <div style={{ marginTop: 20, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
             <Eyebrow>Game lobby — {aboard} of {g.players.length} aboard</Eyebrow>
@@ -2264,6 +2317,10 @@ export default function App() {
 
   /* ---- derived ---- */
   const actor = seat; // null when spectating — every action below is gated on it
+  const duckFresh = g.duckAt > 0 && now - g.duckAt < 45000 && g.winner == null;
+  const quackedMe = actor != null && g.winner == null && g.duckAt > 0 &&
+    (g.duckTo || []).includes(actor) &&
+    (g.turn === actor || (g.pendingDiscard[actor] || 0) > 0);
   const hand = actor != null ? g.hands[actor] : emptyHand();
   const owed = actor != null ? g.pendingDiscard[actor] || 0 : 0;
   const myTurn = actor != null && g.turn === actor && g.winner == null;
@@ -2413,8 +2470,14 @@ export default function App() {
       <div style={{ position: "relative" }}>
         <div className={shaking ? "hb-shake" : undefined} style={{ position: "relative" }}>
         <Board g={g} sel={effSel} onPick={onPick} pending={pendingValid ? pending : null} />
-        {g.duckAt > 0 && now - g.duckAt < 45000 && (
-          <div className="hb-duckorbit"><span><span className="hb-flap">🦆</span></span></div>
+        {(duckFresh || quackedMe) && (
+          <div className="hb-quack" style={{ position: "absolute", right: 10, bottom: 8, zIndex: 5,
+            pointerEvents: "none", textAlign: "center" }}>
+            <div style={{ background: C.parch, color: "#20262b", fontFamily: dispFont, fontSize: 12,
+              letterSpacing: ".14em", padding: "3px 9px", borderRadius: 6, marginBottom: 2,
+              boxShadow: "0 2px 5px rgba(0,0,0,.45)" }}>QUACK</div>
+            <span className="hb-flap" style={{ fontSize: 30, filter: "drop-shadow(0 2px 3px rgba(0,0,0,.5))" }}>🦆</span>
+          </div>
         )}
       </div>
         {gains && (
@@ -2928,6 +2991,20 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
                     {counts[n] || "—"}</span>
                 </div>
               ))}
+            </div>
+            <div style={{ marginTop: 12, borderTop: `1px solid ${C.line}`, paddingTop: 8 }}>
+              <Eyebrow>Sevens rolled this game</Eyebrow>
+              <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                {g.players.map((p, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 9, height: 9, borderRadius: 2, background: swatchBg(p.color) }} />
+                    <span style={{ flex: 1, fontSize: 13, color: C.parch }}>{p.name}</span>
+                    <span style={{ fontFamily: dispFont, fontSize: 14, color: (g.stats?.[i]?.[2] || 0) > 0 ? C.rust : C.parchDim }}>
+                      {g.stats?.[i]?.[2] || 0}
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
             <div style={{ marginTop: 12, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
               {hot != null && counts[hot] > 0 ? `${hot} is running hot. ` : ""}The dice owe nobody anything.

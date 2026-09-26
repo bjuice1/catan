@@ -67,6 +67,7 @@ webpush.setVapidDetails("mailto:harbor@example.com", vapid.publicKey, vapid.priv
 const games = new Map(Object.entries(saved.games || {}));  // code -> { v, blob, t }
 const subs = new Map(Object.entries(saved.subs || {}).map(([c, m]) => [c, new Map(Object.entries(m).map(([s, x]) => [+s, x]))]));
 const pinged = new Map(); // code -> Set of "seat:turnNo" already notified
+const ducked = new Map(); // code -> Map(seat -> duckedAt) re-quacked until they move
 persist();
 if (games.size) console.log(`restored ${games.size} game(s) from ${STORE}`);
 const MAX_GAMES = 2000;
@@ -154,6 +155,17 @@ setInterval(() => {
       notify(code, seat, { title: "Harbor · " + code, body: "Still your move — the island waits.", code }, `nudge:${seat}:${g.meta.tn}:${nth}`);
     }
   }
+  // ducked players get a fresh quack every window until they finally move —
+  // annoying by design; no two-reminder mercy here
+  const qwin = Math.floor(Date.now() / NUDGE_MS);
+  for (const [code, seats] of ducked) {
+    const g = games.get(code);
+    if (!g || !g.meta || g.meta.winner != null) { ducked.delete(code); continue; }
+    for (const [seat, at] of seats) {
+      if (Date.now() - at < NUDGE_MS) continue; // the first quack still echoes
+      notify(code, seat, { title: "Harbor · " + code, body: "🦆 Quack. Still your move.", code }, `requack:${seat}:${qwin}`);
+    }
+  }
 }, Math.min(NUDGE_MS / 3, 5 * 60 * 1000));
 
 /* long-poll: GET ?since=N holds until the game moves past N (or ~20s) */
@@ -213,6 +225,17 @@ http.createServer((req, res) => {
         flushWaiters(code);
         // the client tells us who is up; the server just delivers the nudge
         if (meta && typeof meta === "object" && meta.winner != null) burnAlbum(code);
+        if (meta && typeof meta === "object") {
+          // a ducked player who is no longer the blocker has served their time
+          const dset = ducked.get(code);
+          if (dset) {
+            for (const [s] of [...dset]) {
+              const stillBlocking = s === meta.turn || (Array.isArray(meta.discard) && meta.discard.includes(s));
+              if (!stillBlocking || meta.winner != null) dset.delete(s);
+            }
+            if (!dset.size) ducked.delete(code);
+          }
+        }
         if (meta && typeof meta === "object") {
           const { turn, tn, by, discard, winner, tradeTo, rematch } = meta;
           if (typeof rematch === "string" && rematch) {
@@ -294,6 +317,9 @@ http.createServer((req, res) => {
         if (seen.has(tag)) { cooled.push(seat); continue; }
         notify(code, seat, { title: "Harbor · " + code, body: `🦆 ${name} sent a duck — quack, your move.`, code }, tag);
         sent.push(seat);
+        let dset = ducked.get(code);
+        if (!dset) { dset = new Map(); ducked.set(code, dset); }
+        dset.set(seat, Date.now()); // re-quacked every half hour until they move
       }
       return json(res, 200, { sent, cooled, nosub: !sent.length && !cooled.length });
     });
