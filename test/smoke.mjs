@@ -12,7 +12,7 @@ import { readFileSync, mkdtempSync } from "fs";
 import { spawn } from "child_process";
 import { tmpdir } from "os";
 import { join } from "path";
-import { gunzipSync } from "zlib";
+import { gunzipSync, gzipSync } from "zlib";
 
 const code_js = readFileSync(new URL("../bundle.js", import.meta.url), "utf8");
 const PORT = 34871;
@@ -759,6 +759,20 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     await sleep(150);
   }
 
+  // name the arena in game one — it has to follow the crew into the rematch
+  {
+    click(P, "Log");
+    await wait(P, (x) => !!btn(x, "Name this arena"));
+    click(P, "Name this arena");
+    await wait(P, (x) => !!x.document.querySelector('input[placeholder="Arena name"]'));
+    setInput(P, P.document.querySelector('input[placeholder="Arena name"]'), "Duck Pond");
+    await sleep(80);
+    click(P, "Save");
+    check("the arena can be named", await waitState(codeW, (o) => o.ar && o.ar[0] && o.ar[1] === "Duck Pond"));
+    if (btn(P, "×")) click(P, "×");
+    await sleep(150);
+  }
+
   // setup
   for (let s = 0; s < 4; s++) {
     const w = await activePlacer(pair);
@@ -815,6 +829,27 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     check("draft-order record tracks who won from which position",
       H(otherW).includes("Draft-order record") && /1st drafted: \d+ of 1 · 2nd drafted: \d+ of 1/.test(H(otherW)));
     click(otherW, "×");
+
+    const oldS = await decodeState(codeW), newS = await decodeState(newCode);
+    check("the arena id and name carry into the rematch",
+      !!oldS.ar[0] && newS.ar[0] === oldS.ar[0] && newS.ar[1] === "Duck Pond");
+    check("the finished game records its rules in the history",
+      newS.hi.length === 1 && /^\d:\d\d:10:0$/.test(newS.hi[0]));
+    check("the win tally is untouched by the arena fields", newS.ws.split(",").map(Number).reduce((a, b) => a + b, 0) === 1);
+
+    // a blob from before arenas existed: no ar, two-part history entries.
+    // It must open as it always did and keep its tally.
+    const legacy = { ...newS, c: "LGCY", q: 1, hi: newS.hi.map((h) => h.split(":").slice(0, 2).join(":")) };
+    delete legacy.ar;
+    const lblob = "z" + gzipSync(Buffer.from(JSON.stringify(legacy))).toString("base64")
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const put = await fetch(BASE + "api/g/LGCY", { method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ v: 1, blob: lblob }) });
+    const L = boot(BASE + "#g=LGCY", { "harbor-seat-LGCY": "0" }, WIN);
+    const opened = await wait(L, (x) => H(x).includes("LGCY") && H(x).includes("<svg"), 8000);
+    check("a pre-arena blob still opens", put.ok && opened);
+    const lstate = await decodeState("LGCY");
+    check("opening a pre-arena blob does not rewrite it", lstate.ar === undefined && lstate.ws === newS.ws && lstate.hi[0].split(":").length === 2);
   }
 }
 

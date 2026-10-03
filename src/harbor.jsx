@@ -377,8 +377,9 @@ function newGame(code, names) {
     winner: null,
     rematch: "",
     wins: names.map(() => 0), // series tally, carried across rematches
-    history: [], // one {w, o} per finished game: winner seat + draft order
+    history: [], // one {w, o, t, c} per finished game: winner seat, draft order, win target, classic flag
     gameNo: 1,
+    arena: { id: makeArenaId(), name: "" }, // carried across rematches; the id never changes
     log: [{ t: Date.now(), m: "Game created. Place your first town." }],
   };
 }
@@ -465,6 +466,12 @@ function lobbyAddSeat(g) {
   say(g, "A seat was added.");
   return g;
 }
+/* the record a finished game leaves behind; entries from before rules were
+   recorded have no t/c and are read as first-to-10 */
+const histEntry = (g) => ({
+  w: g.winner, o: g.setupOrder.slice(0, g.players.length).join(""),
+  t: g.rules?.win || 10, c: g.rules?.classic ? 1 : 0,
+});
 /* same crew, fresh island — everyone is already seated, so it starts at once */
 function makeRematch(prev, code) {
   const g = newGame(code, prev.players.map((p) => p.name));
@@ -476,10 +483,8 @@ function makeRematch(prev, code) {
     g.players[i].color = p.color; // chosen colours ride into the rematch
   });
   g.wins = prev.players.map((_, i) => (prev.wins?.[i] || 0) + (prev.winner === i ? 1 : 0));
-  g.history = [
-    ...(prev.history || []),
-    { w: prev.winner, o: prev.setupOrder.slice(0, prev.players.length).join("") },
-  ].slice(-40);
+  g.history = [...(prev.history || []), histEntry(prev)].slice(-HISTORY_MAX);
+  g.arena = { id: prev.arena?.id || g.arena.id, name: prev.arena?.name || "" };
   g.gameNo = (prev.gameNo || 1) + 1;
   g.rules = { ...(prev.rules || { win: 10, friendly: false }) };
   g.seriesStats = prev.players.map((_, i) =>
@@ -496,7 +501,7 @@ const ORDINAL = ["1st", "2nd", "3rd", "4th"];
    into history until the next rematch is created */
 function seriesHistory(g) {
   const h = [...(g.history || [])];
-  if (g.winner != null) h.push({ w: g.winner, o: g.setupOrder.slice(0, g.players.length).join("") });
+  if (g.winner != null) h.push(histEntry(g));
   return h;
 }
 const draftPos = (entry, seat) => entry.o.indexOf(String(seat)); // seats are single digits
@@ -868,6 +873,12 @@ const vI = Object.fromEntries(VIDX.map((v, i) => [v, i]));
 const eI = Object.fromEntries(EIDX.map((e, i) => [e, i]));
 const hI = Object.fromEntries(GEO.hexes.map((h, i) => [h.id, i]));
 
+/* the arena is the whole rematch chain: one id for its lifetime, a name the
+   crew can change */
+function makeArenaId() { return makeCode4() + makeCode4(); }
+const ARENA_NAME_MAX = 24;
+const HISTORY_MAX = 200;
+
 function makeCode4() {
   const A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   return Array.from({ length: 4 }, () => A[Math.floor(Math.random() * A.length)]).join("");
@@ -923,7 +934,8 @@ function pack(g) {
     w: g.winner == null ? -1 : g.winner,
     rm: g.rematch || "",
     ws: (g.wins || []).join(","),
-    hi: (g.history || []).map((h) => h.w + ":" + h.o),
+    hi: (g.history || []).map((h) => h.w + ":" + h.o + (h.t ? ":" + h.t + ":" + (h.c ? 1 : 0) : "")),
+    ar: [g.arena?.id || "", g.arena?.name || ""],
     gn: g.gameNo || 1,
     av: Math.max(g.appV || 0, APP_V),
     ru: [g.rules?.win || 10, g.rules?.friendly ? 1 : 0, g.rules?.classic ? 1 : 0],
@@ -998,7 +1010,12 @@ function unpack(o) {
     winner: o.w < 0 ? null : o.w,
     rematch: o.rm || "",
     wins: o.ws ? o.ws.split(",").map(Number) : o.n.map(() => 0),
-    history: (o.hi || []).map((s) => { const [w, ord] = s.split(":"); return { w: +w, o: ord }; }),
+    history: (o.hi || []).map((s) => {
+      const [w, ord, t, c] = s.split(":");
+      return t ? { w: +w, o: ord, t: +t, c: +c } : { w: +w, o: ord };
+    }),
+    /* blobs from before arenas have no ar — the id is minted at the next rematch or rename */
+    arena: { id: (o.ar && o.ar[0]) || "", name: (o.ar && o.ar[1]) || "" },
     gameNo: o.gn || 1,
     appV: o.av || 0,
     rules: o.ru ? { win: o.ru[0] || 10, friendly: !!o.ru[1], classic: !!o.ru[2] } : { win: 10, friendly: false, classic: false },
@@ -2746,10 +2763,12 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
   const [chatText, setChatText] = useState("");
   const [shooting, setShooting] = useState(false);
   const [secretWord, setSecretWord] = useState("");
+  const [arenaName, setArenaName] = useState(g.arena?.name || "");
   useEffect(() => {
     setPick(emptyHand()); setGive(emptyHand()); setWant(emptyHand());
     setPlenty(emptyHand()); setPartner(null); setBankGive(null); setBankWant(null);
     setNewName(actor != null ? g.players[actor].name : ""); setSecretWord("");
+    setArenaName(g.arena?.name || "");
   }, [modal.k]);
   const close = () => setModal(null);
   const cap = (n) => ({ brick: n, lumber: n, wool: n, grain: n, ore: n });
@@ -2758,9 +2777,21 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
     const series = (g.gameNo || 1) > 1 || (g.wins || []).some((w) => w > 0);
     return (
       <Sheet title="Recent moves" onClose={close}>
+        <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <Eyebrow>Arena</Eyebrow>
+            <div style={{ fontFamily: dispFont, fontSize: 17, color: g.arena?.name ? C.gold : C.parchDim,
+              fontStyle: g.arena?.name ? "normal" : "italic", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {g.arena?.name || "Unnamed"}</div>
+          </div>
+          {actor != null && (
+            <Btn onClick={() => setModal({ k: "arena" })} style={{ padding: "6px 10px", fontSize: 12 }}>
+              {g.arena?.name ? "Rename arena" : "Name this arena"}</Btn>
+          )}
+        </div>
         {series && (
           <div style={{ marginBottom: 14, border: `1px solid ${C.line}`, borderRadius: 6, padding: 12 }}>
-            <Eyebrow>Series — game {g.gameNo}</Eyebrow>
+            <Eyebrow>{g.arena?.name || "Series"} — game {g.gameNo}</Eyebrow>
             {standings(g).map((s, rank) => {
               const tot = (k) => (g.seriesStats?.[s.i]?.[k] || 0) + (g.stats?.[s.i]?.[k] || 0);
               return (
@@ -2821,6 +2852,31 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         </div>
         <div style={{ marginTop: 12, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
           The last thirty moves. Anything older is lost to the sea.
+        </div>
+      </Sheet>
+    );
+  }
+
+  if (modal.k === "arena") {
+    const nm = arenaName.trim().slice(0, ARENA_NAME_MAX);
+    return (
+      <Sheet title="Arena name" onClose={close}
+        footer={<Btn tone="go" disabled={!nm || nm === (g.arena?.name || "")} style={{ flex: 1 }}
+          onClick={() => {
+            apply((d) => {
+              if ((d.arena?.name || "") === nm) return false;
+              d.arena = { id: d.arena?.id || makeArenaId(), name: nm };
+              say(d, `${pname(d, actor)} named the arena "${nm}".`);
+            }, true);
+            close();
+          }}>Save</Btn>}>
+        <Eyebrow>Name</Eyebrow>
+        <input value={arenaName} onChange={(e) => setArenaName(e.target.value)} maxLength={ARENA_NAME_MAX}
+          placeholder="Arena name"
+          style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`,
+            borderRadius: 4, padding: "10px", color: C.parch, fontFamily: bodyFont, fontSize: 16 }} />
+        <div style={{ marginTop: 10, color: C.parchDim, fontSize: 13, lineHeight: 1.5 }}>
+          The name follows this crew through every rematch, along with the leaderboard.
         </div>
       </Sheet>
     );
