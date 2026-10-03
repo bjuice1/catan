@@ -837,6 +837,45 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
       newS.hi.length === 1 && /^\d:\d\d:10:0$/.test(newS.hi[0]));
     check("the win tally is untouched by the arena fields", newS.ws.split(",").map(Number).reduce((a, b) => a + b, 0) === 1);
 
+    // house rules can change mid-game, from inside the game
+    click(otherW, "Log");
+    await wait(otherW, (x) => !!btn(x, "Change rules"));
+    click(otherW, "Change rules");
+    await wait(otherW, (x) => !!btn(x, "Save rules"));
+    click(otherW, "First to 12");
+    click(otherW, "Road-splitting towns");
+    await sleep(80);
+    click(otherW, "Save rules");
+    check("house rules can be changed mid-game",
+      await waitState(newCode, (o) => o.ru[0] === 12 && o.ru[1] === 0 && o.ru[2] === 1));
+    const ruled = await decodeState(newCode);
+    check("a rules change is announced in the log",
+      ruled.lg.some((m) => m.includes("first to 12")) && ruled.lg.some((m) => m.includes("road-splitting towns on")));
+    check("a rules change leaves the tally and arena alone", ruled.ws === newS.ws && ruled.ar[1] === "Duck Pond");
+    if (btn(otherW, "×")) click(otherW, "×");
+
+    // seat 0 showing 10+ points on the board (five cities): targets of 8 and 10 must be
+    // refused, or picking one would end the game on the spot
+    {
+      const used = new Set(ruled.b.filter((_, k) => k % 3 === 0));
+      const extra = [];
+      for (let v = 0; v < 54 && extra.length < 15; v++) if (!used.has(v)) extra.push(v, 0, 1);
+      const tall = { ...ruled, c: "RULZ", q: 1, w: -1, b: [...ruled.b, ...extra] };
+      const tblob = "z" + gzipSync(Buffer.from(JSON.stringify(tall))).toString("base64")
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      await fetch(BASE + "api/g/RULZ", { method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ v: 1, blob: tblob }) });
+      const R = boot(BASE + "#g=RULZ", { "harbor-seat-RULZ": "0" });
+      await wait(R, (x) => !!btn(x, "Log"), 8000);
+      click(R, "Log");
+      await wait(R, (x) => !!btn(x, "Change rules"));
+      click(R, "Change rules");
+      await wait(R, (x) => !!btn(x, "Save rules"));
+      const dis = (t) => { const b = btn(R, t); return !!b && b.disabled; };
+      check("a target someone already shows on the board can't be picked",
+        dis("First to 8") && dis("First to 10") && !dis("First to 15"));
+    }
+
     // a blob from before arenas existed: no ar, two-part history entries.
     // It must open as it always did and keep its tally.
     const legacy = { ...newS, c: "LGCY", q: 1, hi: newS.hi.map((h) => h.split(":").slice(0, 2).join(":")) };

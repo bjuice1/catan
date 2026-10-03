@@ -74,6 +74,17 @@ test/smoke.mjs    Real server + four jsdom phones. See below.
   client poll loop and the lobby/serverGet paths are different code — the
   loop uses `since`, everything else gets an immediate response.
 
+- **An arena is the rematch chain, not a server object.** `g.arena` (id +
+  name), `wins`, `history` and `rules` are copied forward by `makeRematch`;
+  nothing else ties the games together. Pre-arena blobs have no `ar` and get
+  an id at their next rematch or rename — never backfill or rewrite them.
+- **House rules change mid-game through `setRules`**, which refuses a win
+  target someone already shows on the board (public score only — checking
+  hidden point cards would leak them). It runs as a social action so a rules
+  change can never itself end a game. History entries record the target and
+  road-splitting flag in force when the game ended; entries without them are
+  first-to-10.
+
 ## Rules coverage
 
 Full ruleset: snake-draft setup, production with the official bank-shortage

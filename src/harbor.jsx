@@ -388,6 +388,27 @@ function newGame(code, names) {
    reach a victory quickly */
 const winAt = (g) => (typeof window !== "undefined" && window.HARBOR_WIN_AT) || (g && g.rules && g.rules.win) || 10;
 
+/* House rules can change mid-game — the crew may realise they're in the wrong
+   kind of game. A target someone already shows on the board is refused, so
+   flipping a setting can never end the game on the spot (hidden point cards
+   deliberately don't count: refusing on them would leak them). */
+const WIN_TARGETS = [8, 10, 12, 15];
+const minWinTarget = (g) => Math.max(...g.players.map((_, i) => scoreFor(g, i, false))) + 1;
+const rulesLine = (r) => `First to ${r?.win || 10}${r?.friendly ? " · friendly robber" : ""}${r?.classic ? " · road-splitting towns" : ""}`;
+function setRules(g, by, next) {
+  if (g.winner != null) return false;
+  const cur = { win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic };
+  const win = WIN_TARGETS.includes(next.win) ? next.win : cur.win;
+  if (win !== cur.win && win < minWinTarget(g)) return false;
+  const out = { win, friendly: !!next.friendly, classic: !!next.classic };
+  if (out.win === cur.win && out.friendly === cur.friendly && out.classic === cur.classic) return false;
+  if (out.win !== cur.win) say(g, `${pname(g, by)} changed the game to first to ${out.win}.`);
+  if (out.classic !== cur.classic) say(g, `${pname(g, by)} turned road-splitting towns ${out.classic ? "on" : "off"}.`);
+  if (out.friendly !== cur.friendly) say(g, `${pname(g, by)} turned the friendly robber ${out.friendly ? "on" : "off"}.`);
+  g.rules = out;
+  return g;
+}
+
 /* Build stamp, injected by build.mjs. A client older than the state it reads
    must never write: it would silently strip every field it doesn't know
    about. The window override exists only so the smoke test can play an
@@ -2289,7 +2310,7 @@ export default function App() {
             Game {g.code} — the island appears when everyone's aboard.
           </div>
           <div style={{ color: C.gold, marginTop: 6, fontSize: 13, fontFamily: dispFont, letterSpacing: ".1em", textTransform: "uppercase" }}>
-            First to {g.rules?.win || 10}{g.rules?.friendly ? " · friendly robber" : ""}{g.rules?.classic ? " · road-splitting towns" : ""}
+            {rulesLine(g.rules)}
           </div>
           <div style={{ marginTop: 20, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
             <Eyebrow>Game lobby — {aboard} of {g.players.length} aboard</Eyebrow>
@@ -2764,17 +2785,24 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
   const [shooting, setShooting] = useState(false);
   const [secretWord, setSecretWord] = useState("");
   const [arenaName, setArenaName] = useState(g.arena?.name || "");
+  const [draftRules, setDraftRules] = useState({ win: 10, friendly: false, classic: false });
   useEffect(() => {
     setPick(emptyHand()); setGive(emptyHand()); setWant(emptyHand());
     setPlenty(emptyHand()); setPartner(null); setBankGive(null); setBankWant(null);
     setNewName(actor != null ? g.players[actor].name : ""); setSecretWord("");
     setArenaName(g.arena?.name || "");
+    setDraftRules({ win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic });
   }, [modal.k]);
   const close = () => setModal(null);
   const cap = (n) => ({ brick: n, lumber: n, wool: n, grain: n, ore: n });
 
   if (modal.k === "log") {
     const series = (g.gameNo || 1) > 1 || (g.wins || []).some((w) => w > 0);
+    /* wins by game length come from the per-game record, which is capped and
+       older than the rule itself — so it's only shown once lengths differ */
+    const hist = seriesHistory(g);
+    const lengths = [...new Set(hist.map((e) => e.t || 10))].sort((a, b) => a - b);
+    const partial = hist.length < (g.wins || []).reduce((x, y) => x + y, 0) + (g.winner != null ? 1 : 0);
     return (
       <Sheet title="Recent moves" onClose={close}>
         <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
@@ -2787,6 +2815,15 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
           {actor != null && (
             <Btn onClick={() => setModal({ k: "arena" })} style={{ padding: "6px 10px", fontSize: 12 }}>
               {g.arena?.name ? "Rename arena" : "Name this arena"}</Btn>
+          )}
+        </div>
+        <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <Eyebrow>House rules</Eyebrow>
+            <div style={{ fontSize: 14, color: C.parch }}>{rulesLine(g.rules)}</div>
+          </div>
+          {actor != null && g.winner == null && (
+            <Btn onClick={() => setModal({ k: "rules" })} style={{ padding: "6px 10px", fontSize: 12 }}>Change rules</Btn>
           )}
         </div>
         {series && (
@@ -2805,6 +2842,11 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
                   <div style={{ marginLeft: 33, fontSize: 11, color: C.parchDim }}>
                     gained {tot(0)} · stolen {tot(1)} · sevens {tot(2)}
                   </div>
+                  {lengths.length > 1 && (
+                    <div style={{ marginLeft: 33, fontSize: 11, color: C.parchDim }}>
+                      {partial ? `last ${hist.length} games: ` : "wins: "}{lengths.map((t) => `${hist.filter((e) => e.w === s.i && (e.t || 10) === t).length} to ${t}`).join(" · ")}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -2852,6 +2894,44 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         </div>
         <div style={{ marginTop: 12, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
           The last thirty moves. Anything older is lost to the sea.
+        </div>
+      </Sheet>
+    );
+  }
+
+  if (modal.k === "rules") {
+    const floor = minWinTarget(g);
+    const cur = { win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic };
+    const changed = draftRules.win !== cur.win || draftRules.friendly !== cur.friendly || draftRules.classic !== cur.classic;
+    const toggle = (key, label, hint) => (
+      <button onClick={() => setDraftRules((r) => ({ ...r, [key]: !r[key] }))} style={{ width: "100%", textAlign: "left",
+        background: draftRules[key] ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+        border: `1px solid ${draftRules[key] ? C.gold : C.line}`, color: draftRules[key] ? C.gold : C.parchDim,
+        borderRadius: 5, padding: "9px 12px", fontFamily: dispFont, fontSize: 13, cursor: "pointer", marginBottom: 8 }}>
+        {label} {draftRules[key] ? "— on" : "— off"} <span style={{ textTransform: "none", fontFamily: bodyFont, fontSize: 12 }}>({hint})</span>
+      </button>
+    );
+    return (
+      <Sheet title="House rules" onClose={close}
+        footer={<Btn tone="go" disabled={!changed} style={{ flex: 1 }}
+          onClick={() => { apply((d) => setRules(d, actor, draftRules), true); close(); }}>Save rules</Btn>}>
+        <Eyebrow>Points to win</Eyebrow>
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          {WIN_TARGETS.map((n) => {
+            const on = draftRules.win === n, blocked = n !== cur.win && n < floor;
+            return (
+              <button key={n} disabled={blocked} onClick={() => setDraftRules((r) => ({ ...r, win: n }))} style={{ flex: 1,
+                background: on ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+                border: `1px solid ${on ? C.gold : C.line}`, color: on ? C.gold : C.parchDim, opacity: blocked ? 0.35 : 1,
+                borderRadius: 5, padding: "9px 4px", fontFamily: dispFont, fontSize: 13, cursor: blocked ? "default" : "pointer" }}>First to {n}</button>
+            );
+          })}
+        </div>
+        {toggle("classic", "Road-splitting towns", "classic Catan: a town may land mid-road and cut a longest road")}
+        {toggle("friendly", "Friendly robber", "no robbing anyone below 3 points")}
+        <div style={{ marginTop: 6, color: C.parchDim, fontSize: 13, lineHeight: 1.5 }}>
+          Changes apply from now on, are announced in the log, and carry into every rematch.
+          A target someone has already reached on the board can't be picked.
         </div>
       </Sheet>
     );
