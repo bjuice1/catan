@@ -228,7 +228,7 @@ for (let t = 0; t < 35; t++) {
   }
   const roller = phones.find((w) => btn(w, "Roll the dice"));
   if (roller) { click(roller, "Roll the dice"); await sleep(280); }
-  const robberW = phones.find((w) => H(w).includes("move the robber"));
+  const robberW = phones.find((w) => H(w).includes("Tap a hex to move the robber"));
   if (robberW) {
     const hx = [...robberW.document.querySelectorAll("polygon")].filter((p) => p.getAttribute("stroke") === "#e0a437");
     if (hx.length) { await place(robberW, hx[0]); robbers++; await sleep(280); }
@@ -279,7 +279,7 @@ check("3:1 ports wear the rainbow ring", phones.every((w) => H(w).includes('clas
     }
     const roller = phones.find((w) => btn(w, "Roll the dice"));
     if (roller) { click(roller, "Roll the dice"); await sleep(280); }
-    const robberW = phones.find((w) => H(w).includes("move the robber"));
+    const robberW = phones.find((w) => H(w).includes("Tap a hex to move the robber"));
     if (robberW) {
       const hx = [...robberW.document.querySelectorAll("polygon")].filter((p) => p.getAttribute("stroke") === "#e0a437");
       if (hx.length) { await place(robberW, hx[0]); await sleep(280); }
@@ -757,6 +757,11 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     check("the quick-emoji bar sends a duck to the chat", quacked);
     click(P, "×");
     await sleep(150);
+    const strip = Q.document.querySelector('[title="chat-strip"]');
+    check("the latest chat message shows under the board on the other phone",
+      !!strip && strip.textContent.includes("🦆") && strip.textContent.includes("CHAT 1"));
+    check("the latest log line shows under the board",
+      (Q.document.querySelector('[title="log-strip"]') || {}).textContent?.length > 10);
   }
 
   // name the arena in game one — it has to follow the crew into the rematch
@@ -823,6 +828,9 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
       followed && !H(otherW).includes("pick your seat")
       && new RegExp(`you're ${loserName}|Your turn, ${loserName}`).test(H(otherW)));
     check("the rematch carries the series tally forward", H(otherW).includes("★1"));
+    const remembered = (w) => JSON.parse(w.localStorage.getItem("harbor-games") || "[]").map((x) => x.code);
+    check("the finished game drops off both phones' lists in favour of the rematch",
+      [winnerW, otherW].every((w) => remembered(w).includes(newCode) && !remembered(w).includes(codeW)));
     click(otherW, "Log");
     await sleep(200);
     check("series stats show in the log sheet", /gained \d+ · stolen \d+ · sevens \d+/.test(H(otherW)));

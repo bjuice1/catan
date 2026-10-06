@@ -1196,7 +1196,7 @@ function rememberGame(code) {
   try {
     const list = knownGames().filter((g) => g.code !== code);
     list.unshift({ code, t: Date.now() });
-    window.localStorage.setItem("harbor-games", JSON.stringify(list.slice(0, 12)));
+    window.localStorage.setItem("harbor-games", JSON.stringify(list.slice(0, 40)));
   } catch { /* best effort */ }
 }
 function forgetGame(code) {
@@ -1331,6 +1331,14 @@ function Fireworks({ letter }) {
   );
 }
 
+/* the switch-game pills: a scrolling row, so five live games never shove the
+   turn text off a phone screen */
+function PillRow({ children }) {
+  return (
+    <div style={{ display: "flex", gap: 6, overflowX: "auto", flexShrink: 1, minWidth: 0, maxWidth: "60%",
+      scrollbarWidth: "none", WebkitOverflowScrolling: "touch" }}>{children}</div>
+  );
+}
 function GamePill({ o, onGo }) {
   return (
     <button title={"switch-" + o.code} onClick={() => onGo(o.code)}
@@ -1743,26 +1751,42 @@ export default function App() {
     if (g || booting) return;
     let dead = false;
     (async () => {
-      const list = knownGames().slice(0, 8);
-      if (!list.length) { setLobby([]); return; }
-      const out = [];
-      for (const it of list) {
-        let res = await serverGet(it.code);
-        if (!res) { const c = await restoreGame(it.code); if (c) res = c; }
-        if (!res) { out.push({ code: it.code, gone: true }); continue; }
+      const look = async (code) => {
+        let res = await serverGet(code);
+        if (!res) { const c = await restoreGame(code); if (c) res = c; }
+        if (!res) return { code, gone: true };
         try {
           const gm = await decodeGame(res.blob);
-          const s = knownSeat(it.code);
-          out.push({
-            code: it.code,
+          const s = knownSeat(code);
+          return {
+            code,
+            arena: gm.arena?.name || "",
             names: gm.players.filter((p) => p.claimed).map((p) => p.name).join(", "),
             turnName: pname(gm, gm.turn),
             myTurn: s != null && gm.winner == null && gm.phase !== "lobby" && (gm.turn === s || (gm.pendingDiscard[s] || 0) > 0),
             over: gm.winner != null,
+            rematch: gm.winner != null ? gm.rematch || "" : "",
             inLobby: gm.phase === "lobby",
-          });
-        } catch { out.push({ code: it.code, gone: true }); }
+          };
+        } catch { return { code, gone: true }; }
+      };
+      const seen = new Set();
+      let queue = knownGames().map((it) => it.code);
+      const out = [];
+      /* a finished game whose rematch is already going is shown as the
+         rematch instead — otherwise finished games pile up and push the live
+         ones off the screen */
+      while (queue.length) {
+        const batch = queue.filter((c) => !seen.has(c));
+        batch.forEach((c) => seen.add(c));
+        queue = [];
+        for (const it of await Promise.all(batch.map(look))) {
+          if (it.rematch && !seen.has(it.rematch)) { forgetGame(it.code); rememberGame(it.rematch); queue.push(it.rematch); continue; }
+          out.push(it);
+        }
       }
+      const rank = (it) => (it.myTurn ? 0 : it.inLobby ? 1 : !it.over && !it.gone ? 2 : it.gone ? 3 : 4);
+      out.sort((a, b) => rank(a) - rank(b));
       if (!dead) setLobby(out);
     })();
     return () => { dead = true; };
@@ -1838,22 +1862,23 @@ export default function App() {
       // a rematch this phone hasn't joined yet still counts as a live game
       const rm = gRef.current && gRef.current.rematch;
       if (rm && !known.some((it) => it.code === rm)) known.unshift({ code: rm });
-      const list = known.filter((it) => it.code !== code).slice(0, 4);
-      const out = [];
-      for (const it of list) {
+      const list = known.filter((it) => it.code !== code);
+      const found = await Promise.all(list.map(async (it) => {
         const res = await serverGet(it.code);
-        if (!res) continue;
+        if (!res) return null;
         try {
           const gm = await decodeGame(res.blob);
-          if (gm.winner != null) continue; // only games still alive
+          if (gm.winner != null) return null; // only games still alive
           const s = knownSeat(it.code);
-          out.push({
+          return {
             code: it.code,
             myTurn: s != null && gm.phase !== "lobby" && (gm.turn === s || (gm.pendingDiscard[s] || 0) > 0),
-          });
-        } catch { /* skip an unreadable game */ }
-      }
-      if (!dead) setOthers(out);
+          };
+        } catch { return null; }
+      }));
+      const out = found.filter(Boolean);
+      out.sort((a, b) => (b.myTurn ? 1 : 0) - (a.myTurn ? 1 : 0));
+      if (!dead) setOthers(out.slice(0, 8));
     };
     scan();
     const id = setInterval(scan, Math.max((window.HARBOR_POLL_MS || 3000) * 3, 300));
@@ -2076,6 +2101,7 @@ export default function App() {
     if (t) { try { window.localStorage.setItem(tokKey(newCode), t); } catch { /* best effort */ } }
     if (seat != null) rememberSeat(newCode, seat);
     rememberGame(newCode);
+    forgetGame(prev.code); // the finished game lives on inside the new one's series record
     setNote("");
     await loadByCode(newCode);
   };
@@ -2157,6 +2183,7 @@ export default function App() {
                         : it.inLobby ? "in the lobby"
                         : it.myTurn ? "YOUR TURN"
                         : `waiting on ${it.turnName}`}
+                      {it.arena ? <span style={{ color: C.gold }}> — {it.arena}</span> : null}
                       {it.names ? <span style={{ color: C.parchDim }}> — {it.names}</span> : null}
                     </Btn>
                     <Btn onClick={() => { forgetGame(it.code); setLobby(lobby.filter((x) => x.code !== it.code)); }}
@@ -2491,7 +2518,7 @@ export default function App() {
               : actor == null ? `${pname(g, g.turn)}'s turn — you're watching`
               : `${pname(g, g.turn)}'s turn — you're ${pname(g, actor)}`}
           </span>
-          {others.map((o) => <GamePill key={o.code} o={o} onGo={switchGame} />)}
+          <PillRow>{others.map((o) => <GamePill key={o.code} o={o} onGo={switchGame} />)}</PillRow>
         </div>
       )}
 
@@ -2501,7 +2528,7 @@ export default function App() {
           alignItems: "center", gap: 6, fontFamily: dispFont, fontSize: 12, letterSpacing: ".12em",
           textTransform: "uppercase", color: C.parchDim }}>
           <span style={{ flex: 1 }}>Games still going</span>
-          {others.map((o) => <GamePill key={o.code} o={o} onGo={switchGame} />)}
+          <PillRow>{others.map((o) => <GamePill key={o.code} o={o} onGo={switchGame} />)}</PillRow>
         </div>
       )}
 
@@ -2568,6 +2595,37 @@ export default function App() {
         )}
         {note && <div style={{ marginTop: 6, color: note.startsWith("You stole") || note.startsWith("🦆") || note.includes("accepted your trade") ? C.gold : "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
       </div>
+
+      {/* the ship's chat and the log, one line each, always in view — tap to open */}
+      {(() => {
+        const last = (g.chat || [])[(g.chat || []).length - 1];
+        const unread = Math.max(0, (g.chat?.length || 0) - chatSeen);
+        const lastLog = g.log[g.log.length - 1];
+        const oneLine = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0, flex: 1 };
+        return (
+          <div style={{ padding: "7px 14px", borderBottom: `1px solid ${C.line}`, background: "rgba(255,255,255,.02)",
+            display: "flex", flexDirection: "column", gap: 4, fontSize: 13 }}>
+            <div title="chat-strip" onClick={() => setModal({ k: "chat" })} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <span style={{ fontFamily: dispFont, fontSize: 11, letterSpacing: ".1em", color: unread ? C.gold : C.parchDim, flexShrink: 0 }}>
+                CHAT{unread ? ` ${Math.min(40, unread)}` : ""}</span>
+              {last ? (
+                <span style={{ ...oneLine, color: unread ? C.parch : C.parchDim }}>
+                  <span style={{ color: last.p === actor ? C.gold : C.parchDim, fontFamily: dispFont, fontSize: 12 }}>{pname(g, last.p)}</span>
+                  {" "}{/^\[\[img:/.test(last.m) ? "📷 photo" : last.m}
+                </span>
+              ) : <span style={{ ...oneLine, color: C.parchDim, fontStyle: "italic" }}>say something to the crew</span>}
+              <span style={{ color: C.parchDim, flexShrink: 0 }}>›</span>
+            </div>
+            {lastLog && (
+              <div title="log-strip" onClick={() => setModal({ k: "log" })} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                <span style={{ fontFamily: dispFont, fontSize: 11, letterSpacing: ".1em", color: C.parchDim, flexShrink: 0 }}>LOG</span>
+                <span style={{ ...oneLine, color: C.parchDim }}>{lastLog.m}</span>
+                <span style={{ color: C.parchDim, flexShrink: 0 }}>›</span>
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* your hand rides directly under the board — the thing you check most */}
       {actor != null && (
