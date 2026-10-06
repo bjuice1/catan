@@ -36,10 +36,10 @@ const MULTI = 99;
 const MULTI_SET = ["#c94f38", "#3c78b4", "#e0a437", "#69a05a", "#8e6bb5", "#3aa8a0"];
 const swatchBg = (c) =>
   c === MULTI ? "linear-gradient(135deg,#c94f38,#e0a437,#69a05a,#3c78b4,#8e6bb5)" : (PC[c] || PC[0]).hex;
-const pieceFill = (c, key) =>
-  c === MULTI
-    ? MULTI_SET[[...String(key)].reduce((a, ch) => a + ch.charCodeAt(0), 0) % MULTI_SET.length]
-    : (PC[c] || PC[0]).hex;
+/* the rainbow colour paints each piece with a real rainbow: every piece gets
+   its own gradient, laid along the road or across the house (see RainbowDef) */
+const RAINBOW = ["#c94f38", "#e0a437", "#69a05a", "#3c78b4", "#8e6bb5"];
+const pieceFill = (c, id) => (c === MULTI ? `url(#rb-${id})` : (PC[c] || PC[0]).hex);
 const C = {
   sea: "#0e2a35", seaDeep: "#071c25", ink: "#061419",
   parch: "#efe6d2", parchDim: "#bfb69f", line: "#1e4a5a",
@@ -1352,6 +1352,16 @@ function GamePill({ o, onGo }) {
   );
 }
 
+/* a rainbow laid between two points in board space — objectBoundingBox
+   gradients vanish on a perfectly horizontal or vertical road */
+function RainbowDef({ id, x1, y1, x2, y2 }) {
+  return (
+    <linearGradient id={"rb-" + id} gradientUnits="userSpaceOnUse" x1={x1} y1={y1} x2={x2} y2={y2}>
+      {RAINBOW.map((col, k) => <stop key={k} offset={`${(k * 100) / (RAINBOW.length - 1)}%`} stopColor={col} />)}
+    </linearGradient>
+  );
+}
+
 function Die({ n, hot }) {
   const PIPS = { 1: [4], 2: [0, 8], 3: [0, 4, 8], 4: [0, 2, 6, 8], 5: [0, 2, 4, 6, 8], 6: [0, 2, 3, 5, 6, 8] };
   return (
@@ -1581,17 +1591,29 @@ function Board({ g, sel, onPick, pending }) {
           runs its mount animation (the slam / the build) */}
       {Object.entries(g.roads).map(([e, owner]) => {
         const r = roadPath(e);
-        return <line key={e} className="hb-road" x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={pieceFill(g.players[owner].color, e)}
-          strokeWidth="2.1" strokeLinecap="round" />;
+        const c = g.players[owner].color;
+        return (
+          <g key={e}>
+            {c === MULTI && <RainbowDef id={"e" + eI[e]} x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} />}
+            <line className="hb-road" x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={pieceFill(c, "e" + eI[e])}
+              strokeWidth="2.1" strokeLinecap="round" />
+          </g>
+        );
       })}
       {Object.entries(g.buildings).map(([v, bl]) => {
         const p = GEO.vertexPos[v];
-        const col = pieceFill(g.players[bl.owner].color, v);
+        const c = g.players[bl.owner].color;
+        const col = pieceFill(c, "v" + vI[v]);
+        const def = c === MULTI && <RainbowDef id={"v" + vI[v]} x1={p.x - 2.8} y1={p.y + 2} x2={p.x + 2.8} y2={p.y - 3} />;
         return bl.type === "settlement" ? (
-          <polygon key={v} className="hb-build" points={`${p.x - 2},${p.y + 2} ${p.x - 2},${p.y - 0.6} ${p.x},${p.y - 2.6} ${p.x + 2},${p.y - 0.6} ${p.x + 2},${p.y + 2}`}
-            fill={col} stroke="rgba(6,20,25,.75)" strokeWidth="0.45" />
+          <g key={v}>
+            {def}
+            <polygon className="hb-build" points={`${p.x - 2},${p.y + 2} ${p.x - 2},${p.y - 0.6} ${p.x},${p.y - 2.6} ${p.x + 2},${p.y - 0.6} ${p.x + 2},${p.y + 2}`}
+              fill={col} stroke="rgba(6,20,25,.75)" strokeWidth="0.45" />
+          </g>
         ) : (
           <g key={v + bl.type} className="hb-build">
+            {def}
             <rect x={p.x - 2.8} y={p.y - 1.2} width="5.6" height="3.4" fill={col} stroke="rgba(6,20,25,.75)" strokeWidth="0.45" />
             <polygon points={`${p.x - 2.8},${p.y - 1.2} ${p.x},${p.y - 3.6} ${p.x + 2.8},${p.y - 1.2}`}
               fill={col} stroke="rgba(6,20,25,.75)" strokeWidth="0.45" />
