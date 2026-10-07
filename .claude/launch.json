@@ -4,7 +4,19 @@
     {
       "name": "harbor",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["server.js"],
+      "runtimeArgs": [
+        "server.js"
+      ],
+      "port": 3000,
+      "autoPort": true
+    },
+    {
+      "name": "harbor-rehearsal",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "HARBOR_DATA=/private/tmp/claude-502/-Users-JB-catan/8a98e106-8772-45b5-9d65-3be668c47898/scratchpad/rehearsal node server.js"
+      ],
       "port": 3000,
       "autoPort": true
     }
