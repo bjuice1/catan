@@ -582,14 +582,14 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   const storage = {};
   for (let i = 0; i < A.localStorage.length; i++) { const k = A.localStorage.key(i); storage[k] = A.localStorage.getItem(k); }
   const L = boot(BASE, storage); // no hash: straight to the home screen
-  const listed = await wait(L, (x) => H(x).includes("Your games") && H(x).includes(code));
+  const listed = await wait(L, (x) => H(x).includes("Your arenas") && H(x).includes(code));
   check("home screen lists the games this phone is in", listed);
   const row = [...L.document.querySelectorAll("button")].find((b) => b.textContent.includes(code));
   tap(L, row);
   check("tapping a lobby game opens its board", await wait(L, (x) => H(x).includes("<svg")));
   const back = L.document.querySelector('[title="All your games"]');
   if (back) { tap(L, back); }
-  check("the header takes you back to the lobby", !!back && await wait(L, (x) => H(x).includes("Your games")));
+  check("the header takes you back to the lobby", !!back && await wait(L, (x) => H(x).includes("Your arenas")));
 }
 
 // ---- the volume store alone revives games across restarts ----
@@ -828,6 +828,8 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
       followed && !H(otherW).includes("pick your seat")
       && new RegExp(`you're ${loserName}|Your turn, ${loserName}`).test(H(otherW)));
     check("the rematch carries the series tally forward", H(otherW).includes("★1"));
+    check("the arena's name sits in the game header",
+      (otherW.document.querySelector('[title="arena-name"]') || {}).textContent?.includes("Duck Pond"));
     const remembered = (w) => JSON.parse(w.localStorage.getItem("harbor-games") || "[]").map((x) => x.code);
     check("the finished game drops off both phones' lists in favour of the rematch",
       [winnerW, otherW].every((w) => remembered(w).includes(newCode) && !remembered(w).includes(codeW)));

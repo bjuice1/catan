@@ -1783,6 +1783,8 @@ export default function App() {
           return {
             code,
             arena: gm.arena?.name || "",
+            arenaId: gm.arena?.id || "",
+            gameNo: gm.gameNo || 1,
             names: gm.players.filter((p) => p.claimed).map((p) => p.name).join(", "),
             turnName: pname(gm, gm.turn),
             myTurn: s != null && gm.winner == null && gm.phase !== "lobby" && (gm.turn === s || (gm.pendingDiscard[s] || 0) > 0),
@@ -2192,26 +2194,48 @@ export default function App() {
           </div>
           {lobby && lobby.length > 0 && (
             <div style={{ marginTop: 26, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
-              <Eyebrow>Your games</Eyebrow>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {lobby.map((it) => (
-                  <div key={it.code} style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
-                    <Btn tone={it.myTurn ? "go" : "plain"} style={{ flex: 1, textAlign: "left" }}
-                      onClick={() => loadByCode(it.code)}>
-                      <b style={{ letterSpacing: ".08em" }}>{it.code}</b>
-                      {" · "}
-                      {it.gone ? "unreachable right now"
-                        : it.over ? "finished"
-                        : it.inLobby ? "in the lobby"
-                        : it.myTurn ? "YOUR TURN"
-                        : `waiting on ${it.turnName}`}
-                      {it.arena ? <span style={{ color: C.gold }}> — {it.arena}</span> : null}
-                      {it.names ? <span style={{ color: C.parchDim }}> — {it.names}</span> : null}
-                    </Btn>
-                    <Btn onClick={() => { forgetGame(it.code); setLobby(lobby.filter((x) => x.code !== it.code)); }}
-                      style={{ padding: "6px 10px" }}>×</Btn>
-                  </div>
-                ))}
+              <Eyebrow>Your arenas</Eyebrow>
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                {/* one block per arena, its games underneath; a game from before
+                    arenas (or one that can't be reached) stands on its own */}
+                {(() => {
+                  const groups = [];
+                  lobby.forEach((it) => {
+                    const key = it.arenaId || it.code;
+                    let grp = groups.find((x) => x.key === key);
+                    if (!grp) { grp = { key, name: it.arena, names: it.names, items: [] }; groups.push(grp); }
+                    grp.items.push(it);
+                  });
+                  return groups.map((grp) => (
+                    <div key={grp.key}>
+                      <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 6 }}>
+                        <span style={{ fontFamily: dispFont, fontSize: 15, letterSpacing: ".04em",
+                          color: grp.name ? C.gold : C.parchDim, fontStyle: grp.name ? "normal" : "italic" }}>
+                          {grp.name || (grp.items[0].gone ? "Unreachable" : "Unnamed arena")}</span>
+                        {grp.names && <span style={{ fontSize: 12, color: C.parchDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{grp.names}</span>}
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                        {grp.items.map((it) => (
+                          <div key={it.code} style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+                            <Btn tone={it.myTurn ? "go" : "plain"} style={{ flex: 1, textAlign: "left" }}
+                              onClick={() => loadByCode(it.code)}>
+                              <b style={{ letterSpacing: ".08em" }}>{it.code}</b>
+                              {it.gameNo > 1 ? <span style={{ color: C.parchDim }}> · game {it.gameNo}</span> : null}
+                              {" · "}
+                              {it.gone ? "unreachable right now"
+                                : it.over ? "finished"
+                                : it.inLobby ? "in the lobby"
+                                : it.myTurn ? "YOUR TURN"
+                                : `waiting on ${it.turnName}`}
+                            </Btn>
+                            <Btn onClick={() => { forgetGame(it.code); setLobby(lobby.filter((x) => x.code !== it.code)); }}
+                              style={{ padding: "6px 10px" }}>×</Btn>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ));
+                })()}
               </div>
             </div>
           )}
@@ -2287,7 +2311,7 @@ export default function App() {
         <style>{FONTS}</style>
         <div style={{ maxWidth: 520, margin: "0 auto" }}>
           <div style={{ fontFamily: dispFont, fontWeight: 300, fontSize: 44, letterSpacing: ".26em", lineHeight: 1 }}>HARBOR</div>
-          <div style={{ color: C.parchDim, marginTop: 10, fontSize: 15 }}>Game {g.code} — pick your seat.</div>
+          <div style={{ color: C.parchDim, marginTop: 10, fontSize: 15 }}>{g.arena?.name ? `${g.arena.name} · game ${g.code}` : `Game ${g.code}`} — pick your seat.</div>
           <div style={{ marginTop: 20, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
             <Eyebrow>Your name</Eyebrow>
             <input value={claimName} placeholder="Your name"
@@ -2356,7 +2380,7 @@ export default function App() {
         <div style={{ maxWidth: 520, margin: "0 auto" }}>
           <div style={{ fontFamily: dispFont, fontWeight: 300, fontSize: 44, letterSpacing: ".26em", lineHeight: 1 }}>HARBOR</div>
           <div style={{ color: C.parchDim, marginTop: 10, fontSize: 15 }}>
-            Game {g.code} — the island appears when everyone's aboard.
+            {g.arena?.name ? `${g.arena.name} · game ${g.code}` : `Game ${g.code}`} — the island appears when everyone's aboard.
           </div>
           <div style={{ color: C.gold, marginTop: 6, fontSize: 13, fontFamily: dispFont, letterSpacing: ".1em", textTransform: "uppercase" }}>
             {rulesLine(g.rules)}
@@ -2508,6 +2532,13 @@ export default function App() {
             <Btn onClick={share} style={{ padding: "5px 9px", fontSize: 11 }}>Invite</Btn>
           </div>
         </div>
+        {g.arena?.name && (
+          <div title="arena-name" onClick={() => setModal({ k: "log" })} style={{ marginTop: 6, fontFamily: dispFont, fontSize: 13,
+            letterSpacing: ".14em", textTransform: "uppercase", color: C.gold, cursor: "pointer",
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {g.arena.name}<span style={{ color: C.parchDim }}> · game {g.gameNo || 1}</span>
+          </div>
+        )}
         <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
           {g.players.map((p, i) => (
             <div key={i} title={i === actor ? "Your record" : `What ${p.name} has played`}
