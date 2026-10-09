@@ -37,7 +37,9 @@ self.addEventListener("push", (e) => {
     body: data.body || "It's your turn.",
     icon: "/icon-192.png",
     badge: "/icon-192.png",
-    tag: "harbor-" + (data.code || "game"), // one notification per game, newest wins
+    // one notification per game, newest wins — but a chat ping must never
+    // replace a pending "your turn"
+    tag: "harbor-" + (data.kind === "chat" ? "chat-" : "") + (data.code || "game"),
     data: { code: data.code || "" },
   }));
 });

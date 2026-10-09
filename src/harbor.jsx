@@ -1111,6 +1111,15 @@ async function restoreGame(code) {
   } catch { return null; }
   return c;
 }
+/* the server pings the crew about a new message without reading the blob:
+   it only sees a count (to notice a new one) and a one-line preview */
+function chatMeta(g) {
+  const chat = g.chat || [];
+  const last = chat[chat.length - 1];
+  if (!last) return { chat: 0 };
+  const text = /^\[\[img:/.test(last.m) ? "📷 sent a photo" : last.m.slice(0, 120);
+  return { chat: chat.length, chatFrom: pname(g, last.p), chatText: text };
+}
 async function serverPut(g, by) {
   const blob = await encodeGame(g);
   /* meta lets the server ping whoever is up next without reading the blob */
@@ -1121,6 +1130,8 @@ async function serverPut(g, by) {
     winner: g.winner == null ? null : g.winner,
     tradeTo: g.trade ? g.trade.to : null,
     rematch: g.rematch || null,
+    arena: g.arena?.name || null,
+    ...chatMeta(g),
   };
   try {
     const r = await fetch(apiUrl(g.code), {
@@ -1347,7 +1358,7 @@ function GamePill({ o, onGo }) {
         border: `1px solid ${o.myTurn ? C.gold : C.line}`, borderRadius: 5, padding: "4px 8px",
         color: o.myTurn ? C.gold : C.parchDim, fontFamily: dispFont, fontSize: 11,
         letterSpacing: ".08em", cursor: "pointer", flexShrink: 0 }}>
-      ⇄ {o.code}{o.myTurn && <span style={{ color: C.gold }}> ●</span>}
+      ⇄ <span style={{ display: "inline-block", maxWidth: 88, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", verticalAlign: "bottom" }}>{o.arena || o.code}</span>{o.myTurn && <span style={{ color: C.gold }}> ●</span>}
     </button>
   );
 }
@@ -1896,6 +1907,7 @@ export default function App() {
           const s = knownSeat(it.code);
           return {
             code: it.code,
+            arena: gm.arena?.name || "",
             myTurn: s != null && gm.phase !== "lobby" && (gm.turn === s || (gm.pendingDiscard[s] || 0) > 0),
           };
         } catch { return null; }

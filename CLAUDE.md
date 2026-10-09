@@ -133,24 +133,28 @@ Remember to hard-refresh on mobile after a deploy; `Cache-Control` is 5 minutes.
   screen. The screenshot instead exposed the status-bar overlap in standalone
   mode, fixed with safe-area insets.
 - ~~**No notifications.**~~ Web push ships: the server pings the next player
-  on turn changes and seven-discards (driven by client-sent `meta`, so the
-  server stays blob-blind; deduped per turn number). On iPhone this only works
-  after Add to Home Screen + tapping 🔔. VAPID keys are generated per server
-  run unless pinned with `VAPID_PUBLIC`/`VAPID_PRIVATE` env vars on Railway —
-  pin them, else subscriptions silently re-key after each deploy (clients do
-  self-heal by re-subscribing on next open).
+  on turn changes, seven-discards, trade offers, rematches and new chat
+  messages (driven by client-sent `meta`, so the server stays blob-blind;
+  deduped per turn number / chat count; pings are titled with the arena name
+  when there is one). On iPhone this only works after Add to Home Screen +
+  tapping 🔔. VAPID keys are pinned on Railway as `VAPID_PUBLIC`/
+  `VAPID_PRIVATE` (2026-10-09) — never unset them, or every subscription
+  silently re-keys. Under test, `HARBOR_PUSH_LOG` makes the server append
+  every ping it would send to a file (real pushes are https-only).
 - **Hidden information isn't actually hidden.** Anyone who decodes the link can
   read every hand. Unavoidable in this design; the UI just doesn't show it.
   This is stated plainly on the home screen.
 - ~~**Opening an old link forks the game.**~~ Gone by design: the server is
   authoritative and rejects any push whose `seq` isn't strictly newer, so a
   stale link just loads and then syncs forward on the next poll.
-- ~~**Games live in server memory only.**~~ Three layers now: games, push
-  subscriptions, and VAPID keys write through to `$HARBOR_DATA/harbor.json`
-  (auto-detects a Railway volume mounted at `/data`); every phone also keeps
-  a local backup per game and silently re-seeds a server that comes up empty.
-  **Attach a Railway volume at `/data`** to make it airtight — without one the
-  data file dies with each redeploy and only phone backups cover the gap.
+- ~~**Games live in server memory only.**~~ Games, push subscriptions and
+  VAPID keys write through to `$HARBOR_DATA/harbor.json`; a Railway volume is
+  mounted at `/data` (attached 2026-10-09, `catan-volume-QNXe`), so the file
+  survives redeploys. Every phone also keeps a local backup per game and
+  silently re-seeds a server that comes up empty. Full backup: pull
+  `/data/harbor.json` off the container with `railway ssh` (pipe through
+  `base64`, feed stdin from `/dev/null` or the session hangs); by-code
+  backup/restore is `npm run backup`.
 - **Player trading is still record-only.** The offer/accept flow the original
   design couldn't afford (two extra link hand-offs) is now cheap with server
   sync + push. Best next feature.

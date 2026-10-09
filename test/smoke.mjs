@@ -26,7 +26,9 @@ const check = (label, ok) => { console.log(`${ok ? "  ok  " : "  FAIL"}  ${label
 // once turned server.js's require() into a crash-loop on Railway
 const dataA = mkdtempSync(join(tmpdir(), "harbor-a-"));
 const dataB = mkdtempSync(join(tmpdir(), "harbor-b-"));
-const spawnServer = (dataDir = dataA) => spawn(process.execPath, [new URL("../server.js", import.meta.url).pathname], { env: { ...process.env, PORT: String(PORT), HARBOR_DATA: dataDir } });
+const PUSH_LOG = join(dataA, "pushes.log");
+const spawnServer = (dataDir = dataA) => spawn(process.execPath, [new URL("../server.js", import.meta.url).pathname], { env: { ...process.env, PORT: String(PORT), HARBOR_DATA: dataDir, HARBOR_PUSH_LOG: PUSH_LOG } });
+const pushLog = () => { try { return readFileSync(PUSH_LOG, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
 const waitHealthy = async () => {
   for (let i = 0; i < 50; i++) {
     await sleep(100);
@@ -755,11 +757,29 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
       quacked = await waitState(codeW, (o) => (o.cm || []).some(([, m]) => m === "🦆"), 2500);
     }
     check("the quick-emoji bar sends a duck to the chat", quacked);
+
+    // a chat message pings the rest of the crew (real pushes are https-only,
+    // so the server logs every ping it would send — see HARBOR_PUSH_LOG)
+    const sub = { endpoint: "https://127.0.0.1:9/dead", keys: { p256dh: "x", auth: "y" } };
+    for (const seat of [0, 1]) await fetch(BASE + "api/push/sub/" + codeW, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ seat, sub }) });
+    const chatPings = () => pushLog().filter((p) => p.code === codeW && p.kind === "chat");
+    const before = (await decodeState(codeW)).cm.length;
+    tap(P, P.document.querySelector('[title="emoji-🦆"]'));
+    await waitState(codeW, (o) => (o.cm || []).length > before, 3000);
+    for (let t = 0; t < 30 && !chatPings().length; t++) await sleep(100);
+    const got = chatPings();
+    check("a chat message is pushed to the other seat, not the sender",
+      got.length === 1 && got[0].seat === 1 && got[0].body === "Win: 🦆");
+    const before2 = (await decodeState(codeW)).cm.length;
+    tap(P, P.document.querySelector('[title="emoji-🦆"]'));
+    await waitState(codeW, (o) => (o.cm || []).length > before2, 3000);
+    await sleep(400);
+    check("one push per chat message, no repeats on later syncs", chatPings().length === 2);
     click(P, "×");
     await sleep(150);
     const strip = Q.document.querySelector('[title="chat-strip"]');
     check("the latest chat message shows under the board on the other phone",
-      !!strip && strip.textContent.includes("🦆") && strip.textContent.includes("CHAT 1"));
+      !!strip && strip.textContent.includes("🦆") && /CHAT \d/.test(strip.textContent));
     check("the latest log line shows under the board",
       (Q.document.querySelector('[title="log-strip"]') || {}).textContent?.length > 10);
   }

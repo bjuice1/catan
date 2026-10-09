@@ -109,6 +109,10 @@ function notify(code, seat, payload, tag) {
   if (!seen) { seen = new Set(); pinged.set(code, seen); }
   if (seen.has(tag)) return;
   seen.add(tag);
+  // test seam: the smoke test can't receive real pushes (they're https-only)
+  if (process.env.HARBOR_PUSH_LOG) {
+    try { fs.appendFileSync(process.env.HARBOR_PUSH_LOG, JSON.stringify({ code, seat, tag, ...payload }) + "\n"); } catch { /* best effort */ }
+  }
   if (seen.size > 400) pinged.set(code, new Set([...seen].slice(-200)));
   webpush.sendNotification(sub, JSON.stringify(payload)).catch((err) => {
     // 404/410 mean the subscription is dead — forget it
@@ -238,16 +242,31 @@ http.createServer((req, res) => {
         }
         if (meta && typeof meta === "object") {
           const { turn, tn, by, discard, winner, tradeTo, rematch } = meta;
+          // the arena's name, when the crew has given it one, heads every ping
+          const label = typeof meta.arena === "string" && meta.arena ? meta.arena.slice(0, 24) : "Harbor · " + code;
+          // a new chat message: the count went up since the last write. The
+          // first write after a restart sets the baseline without pinging.
+          if (Number.isInteger(meta.chat) && winner == null) {
+            const prevChat = cur && cur.meta && Number.isInteger(cur.meta.chat) ? cur.meta.chat : meta.chat;
+            if (meta.chat > prevChat && typeof meta.chatText === "string") {
+              const from = typeof meta.chatFrom === "string" ? meta.chatFrom.slice(0, 20) : "Someone";
+              const body = `${from}: ${meta.chatText.slice(0, 120)}`;
+              const gameSubs = subs.get(code) || new Map();
+              for (const seat of gameSubs.keys()) {
+                if (seat !== by) notify(code, seat, { title: label, body, code, kind: "chat" }, `chat:${seat}:${meta.chat}`);
+              }
+            }
+          }
           if (typeof rematch === "string" && rematch) {
             const gameSubs = subs.get(code) || new Map();
             for (const seat of gameSubs.keys()) {
-              if (seat !== by) notify(code, seat, { title: "Harbor · " + code, body: "A rematch is starting — tap to join.", code }, `rm:${seat}:${rematch}`);
+              if (seat !== by) notify(code, seat, { title: label, body: "A rematch is starting — tap to join.", code }, `rm:${seat}:${rematch}`);
             }
           }
           if (Number.isInteger(tradeTo) && tradeTo !== by && winner == null) {
-            notify(code, tradeTo, { title: "Harbor · " + code, body: "You have a trade offer.", code }, `trade:${tradeTo}:${v}`);
+            notify(code, tradeTo, { title: label, body: "You have a trade offer.", code }, `trade:${tradeTo}:${v}`);
           }
-          const title = "Harbor · " + code;
+          const title = label;
           if (winner != null) {
             const gameSubs = subs.get(code) || new Map();
             for (const seat of gameSubs.keys()) {
