@@ -191,7 +191,7 @@ check("setup completes into the roll phase",
 }
 
 // ---- turns: each phone acts on its own, server carries the moves ----
-let passes = 0, sevens = 0, discards = 0, robbers = 0, stripEnd = false;
+let passes = 0, sevens = 0, discards = 0, robbers = 0, stripEnd = false, quickRow = false;
 let deputyTried = false, deputyWorked = false;
 // the own-discard button is exactly "Discard N cards" — the deputy button
 // also contains the word "discard", so match precisely
@@ -241,6 +241,7 @@ for (let t = 0; t < 35; t++) {
     if (v) { tap(stealer, v); await sleep(240); }
   }
   const ender = phones.find((w) => btn(w, "End turn"));
+  if (ender && !quickRow) quickRow = !!ender.document.querySelector('[title="quick-build"]');
   // exactly one End turn, and it lives in the dice strip (before the tabs)
   if (ender && !stripEnd) {
     const h = H(ender);
@@ -249,6 +250,7 @@ for (let t = 0; t < 35; t++) {
   if (ender) { click(ender, "End turn"); passes++; await sleep(200); }
 }
 check("turns advance across phones", passes > 15);
+check("the quick-build row sits under the hand on the mover's phone", quickRow);
 check("End turn also sits in the dice strip", stripEnd);
 check("sevens were resolved from each phone", sevens === 0 || discards >= sevens);
 check("a table-mate can discard for an away player", sevens === 0 || deputyWorked);
@@ -874,13 +876,16 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     await wait(otherW, (x) => !!btn(x, "Save rules"));
     click(otherW, "First to 12");
     click(otherW, "Road-splitting towns");
+    click(otherW, "drones");
     await sleep(80);
     click(otherW, "Save rules");
     check("house rules can be changed mid-game",
-      await waitState(newCode, (o) => o.ru[0] === 12 && o.ru[1] === 0 && o.ru[2] === 1));
+      await waitState(newCode, (o) => o.ru[0] === 12 && o.ru[1] === 0 && o.ru[2] === 1 && o.ru[3] === 1));
+    check("the crew can fly drones instead of ducks",
+      await wait(otherW, (x) => !!btn(x, "Send a drone") || /Send a drone|🛸/.test(H(x)), 4000));
     const ruled = await decodeState(newCode);
     check("a rules change is announced in the log",
-      ruled.lg.some((m) => m.includes("first to 12")) && ruled.lg.some((m) => m.includes("road-splitting towns on")));
+      ruled.lg.some((m) => m.includes("first to 12")) && ruled.lg.some((m) => m.includes("road-splitting towns on")) && ruled.lg.some((m) => m.includes("drones")));
     check("a rules change leaves the tally and arena alone", ruled.ws === newS.ws && ruled.ar[1] === "Duck Pond");
     if (btn(otherW, "×")) click(otherW, "×");
 

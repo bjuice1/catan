@@ -165,9 +165,11 @@ setInterval(() => {
   for (const [code, seats] of ducked) {
     const g = games.get(code);
     if (!g || !g.meta || g.meta.winner != null) { ducked.delete(code); continue; }
-    for (const [seat, at] of seats) {
+    for (const [seat, d] of seats) {
+      const at = typeof d === "number" ? d : d.at; // pre-mascot entries are a bare timestamp
+      const M = (d && d.M) || { emoji: "🦆", cry: "Quack" };
       if (Date.now() - at < NUDGE_MS) continue; // the first quack still echoes
-      notify(code, seat, { title: "Harbor · " + code, body: "🦆 Quack. Still your move.", code }, `requack:${seat}:${qwin}`);
+      notify(code, seat, { title: "Harbor · " + code, body: `${M.emoji} ${M.cry}. Still your move.`, code }, `requack:${seat}:${qwin}`);
     }
   }
 }, Math.min(NUDGE_MS / 3, 5 * 60 * 1000));
@@ -318,8 +320,9 @@ http.createServer((req, res) => {
   const pk = u.pathname.match(/^\/api\/poke\/([A-Z0-9]{4,8})$/);
   if (pk && req.method === "POST") {
     readBody(req, (body) => {
-      let to, by;
-      try { ({ to, by } = JSON.parse(body)); } catch { return json(res, 400, { error: "bad json" }); }
+      let to, by, mascot;
+      try { ({ to, by, mascot } = JSON.parse(body)); } catch { return json(res, 400, { error: "bad json" }); }
+      const M = mascot === "drone" ? { emoji: "🛸", noun: "drone", cry: "Bzzz" } : { emoji: "🦆", noun: "duck", cry: "Quack" };
       if (!Array.isArray(to) || !to.length || !to.every((s) => Number.isInteger(s) && s >= 0 && s <= 5)) {
         return json(res, 400, { error: "bad payload" });
       }
@@ -334,11 +337,11 @@ http.createServer((req, res) => {
         if (!gameSubs.has(seat)) continue;
         const tag = `poke:${seat}:${win}`;
         if (seen.has(tag)) { cooled.push(seat); continue; }
-        notify(code, seat, { title: "Harbor · " + code, body: `🦆 ${name} sent a duck — quack, your move.`, code }, tag);
+        notify(code, seat, { title: "Harbor · " + code, body: `${M.emoji} ${name} sent a ${M.noun} — ${M.cry.toLowerCase()}, your move.`, code }, tag);
         sent.push(seat);
         let dset = ducked.get(code);
         if (!dset) { dset = new Map(); ducked.set(code, dset); }
-        dset.set(seat, Date.now()); // re-quacked every half hour until they move
+        dset.set(seat, { at: Date.now(), M }); // re-quacked every half hour until they move
       }
       return json(res, 200, { sent, cooled, nosub: !sent.length && !cooled.length });
     });
