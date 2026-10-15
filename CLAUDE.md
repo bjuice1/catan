@@ -85,6 +85,12 @@ test/smoke.mjs    Real server + four jsdom phones. See below.
   road-splitting flag in force when the game ended; entries without them are
   first-to-10.
 
+- **The messenger (duck/drone/goat/gull/heli) is a per-phone pick, not game
+  state** — `harbor-mascot` / `harbor-mascot-word` in localStorage. What
+  travels in the blob is only what was last *sent* (`duckKind`/`duckWord`,
+  `dk`/`dw`), so every island shows the sender's creature. Same for the
+  extended-view toggle (`harbor-view`): purely local.
+
 ## Rules coverage
 
 Full ruleset: snake-draft setup, production with the official bank-shortage

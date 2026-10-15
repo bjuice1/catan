@@ -317,12 +317,20 @@ http.createServer((req, res) => {
   }
 
   /* a manual poke: one duck per target per 5 hours, however many senders */
+  const MASCOTS = {
+    duck: { emoji: "🦆", noun: "duck", cry: "Quack" },
+    drone: { emoji: "🛸", noun: "drone", cry: "Bzzz" },
+    goat: { emoji: "🐐", noun: "goat", cry: "Baaah" },
+    gull: { emoji: "🦅", noun: "seagull", cry: "Squawk" },
+    heli: { emoji: "🚁", noun: "helicopter", cry: "Whup whup" },
+  };
   const pk = u.pathname.match(/^\/api\/poke\/([A-Z0-9]{4,8})$/);
   if (pk && req.method === "POST") {
     readBody(req, (body) => {
-      let to, by, mascot;
-      try { ({ to, by, mascot } = JSON.parse(body)); } catch { return json(res, 400, { error: "bad json" }); }
-      const M = mascot === "drone" ? { emoji: "🛸", noun: "drone", cry: "Bzzz" } : { emoji: "🦆", noun: "duck", cry: "Quack" };
+      let to, by, mascot, word;
+      try { ({ to, by, mascot, word } = JSON.parse(body)); } catch { return json(res, 400, { error: "bad json" }); }
+      const M = { ...(MASCOTS[mascot] || MASCOTS.duck) };
+      if (typeof word === "string" && word.trim()) M.cry = word.trim().slice(0, 12); // the sender's own bubble word
       if (!Array.isArray(to) || !to.length || !to.every((s) => Number.isInteger(s) && s >= 0 && s <= 5)) {
         return json(res, 400, { error: "bad payload" });
       }

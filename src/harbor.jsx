@@ -359,8 +359,10 @@ function newGame(code, names) {
     sevenAt: 0,
     duckAt: 0,
     duckTo: [],
+    duckKind: "duck", // what was last sent, so every island shows the same creature
+    duckWord: "",
     chat: [], // {p, m} — last 40 messages ride in the blob
-    rules: { win: 10, friendly: false, classic: false, mascot: "duck" },
+    rules: { win: 10, friendly: false, classic: false },
     stats: names.map(() => [0, 0, 0]),       // gained, stolen, sevens (this game)
     seriesStats: names.map(() => [0, 0, 0]), // same, summed over finished games
     phase: "lobby",
@@ -393,24 +395,51 @@ const winAt = (g) => (typeof window !== "undefined" && window.HARBOR_WIN_AT) || 
    flipping a setting can never end the game on the spot (hidden point cards
    deliberately don't count: refusing on them would leak them). */
 const WIN_TARGETS = [8, 10, 12, 15];
-/* the thing you send after a slow player — a house rule, so a crew that
-   would rather fly drones can */
+/* the thing you send after a slow player. Each phone picks its own; the
+   pick rides with the poke (g.duckKind / g.duckWord) so every island shows
+   the sender's creature and hears its cry. */
 const MASCOTS = {
   duck: { emoji: "🦆", noun: "duck", bubble: "QUACK", cry: "quack", fly: "take off", idle: "circling" },
   drone: { emoji: "🛸", noun: "drone", bubble: "BZZZ", cry: "buzz", fly: "launch", idle: "hovering over" },
+  goat: { emoji: "🐐", noun: "goat", bubble: "BAAAH", cry: "scream", fly: "get going", idle: "screaming at" },
+  gull: { emoji: "🦅", noun: "seagull", bubble: "SQUAWK", cry: "squawk", fly: "take off", idle: "circling" },
+  heli: { emoji: "🚁", noun: "helicopter", bubble: "WHUP WHUP", cry: "chop", fly: "lift off", idle: "hovering over" },
 };
-const MASCOT_LIST = ["duck", "drone"];
-const mascotOf = (g) => MASCOTS[g?.rules?.mascot] || MASCOTS.duck;
+const MASCOT_LIST = ["duck", "drone", "goat", "gull", "heli"];
+const WORD_MAX = 12;
+/* this phone's pick — a preference, not game state */
+function myMascot() {
+  try { const m = window.localStorage.getItem("harbor-mascot"); return MASCOTS[m] ? m : "duck"; } catch { return "duck"; }
+}
+function myWord() {
+  try { return (window.localStorage.getItem("harbor-mascot-word") || "").slice(0, WORD_MAX); } catch { return ""; }
+}
+/* extended view: the build tab's rows with costs and counts. Off, the quick
+   row's piece icons in your colour are all you get — a per-phone preference */
+function myExtended() {
+  try { return window.localStorage.getItem("harbor-view") !== "simple"; } catch { return true; }
+}
+function rememberExtended(on) {
+  try { window.localStorage.setItem("harbor-view", on ? "full" : "simple"); } catch { /* best effort */ }
+}
+function rememberMascot(kind, word) {
+  try {
+    window.localStorage.setItem("harbor-mascot", kind);
+    window.localStorage.setItem("harbor-mascot-word", (word || "").slice(0, WORD_MAX));
+  } catch { /* best effort */ }
+}
+/* the creature currently on the island: whoever last sent one */
+const mascotOf = (g) => MASCOTS[g?.duckKind] || MASCOTS.duck;
+const bubbleOf = (g) => (g?.duckWord || mascotOf(g).bubble).toUpperCase();
 const minWinTarget = (g) => Math.max(...g.players.map((_, i) => scoreFor(g, i, false))) + 1;
-const rulesLine = (r) => `First to ${r?.win || 10}${r?.friendly ? " · friendly robber" : ""}${r?.classic ? " · road-splitting towns" : ""}${r?.mascot === "drone" ? " · drones" : ""}`;
+const rulesLine = (r) => `First to ${r?.win || 10}${r?.friendly ? " · friendly robber" : ""}${r?.classic ? " · road-splitting towns" : ""}`;
 function setRules(g, by, next) {
   if (g.winner != null) return false;
-  const cur = { win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic, mascot: MASCOTS[g.rules?.mascot] ? g.rules.mascot : "duck" };
+  const cur = { win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic };
   const win = WIN_TARGETS.includes(next.win) ? next.win : cur.win;
   if (win !== cur.win && win < minWinTarget(g)) return false;
-  const out = { win, friendly: !!next.friendly, classic: !!next.classic, mascot: MASCOTS[next.mascot] ? next.mascot : cur.mascot };
-  if (out.win === cur.win && out.friendly === cur.friendly && out.classic === cur.classic && out.mascot === cur.mascot) return false;
-  if (out.mascot !== cur.mascot) say(g, `${pname(g, by)} swapped the ${cur.mascot}s for ${out.mascot}s ${MASCOTS[out.mascot].emoji}.`);
+  const out = { win, friendly: !!next.friendly, classic: !!next.classic };
+  if (out.win === cur.win && out.friendly === cur.friendly && out.classic === cur.classic) return false;
   if (out.win !== cur.win) say(g, `${pname(g, by)} changed the game to first to ${out.win}.`);
   if (out.classic !== cur.classic) say(g, `${pname(g, by)} turned road-splitting towns ${out.classic ? "on" : "off"}.`);
   if (out.friendly !== cur.friendly) say(g, `${pname(g, by)} turned the friendly robber ${out.friendly ? "on" : "off"}.`);
@@ -950,6 +979,8 @@ function pack(g) {
     sa: g.sevenAt || 0,
     da: g.duckAt || 0,
     dt: g.duckTo || [],
+    dk: g.duckKind || "duck",
+    dw: g.duckWord || "",
     cm: (g.chat || []).map((c) => [c.p, c.m]),
     tr: g.trade ? [g.trade.from, g.trade.to, ...RES.map((r) => g.trade.give[r] || 0), ...RES.map((r) => g.trade.want[r] || 0), g.trade.at || 0] : 0,
     ph: PH_LIST.indexOf(g.phase),
@@ -968,7 +999,7 @@ function pack(g) {
     ar: [g.arena?.id || "", g.arena?.name || ""],
     gn: g.gameNo || 1,
     av: Math.max(g.appV || 0, APP_V),
-    ru: [g.rules?.win || 10, g.rules?.friendly ? 1 : 0, g.rules?.classic ? 1 : 0, Math.max(0, MASCOT_LIST.indexOf(g.rules?.mascot))],
+    ru: [g.rules?.win || 10, g.rules?.friendly ? 1 : 0, g.rules?.classic ? 1 : 0],
     st: g.stats || g.players.map(() => [0, 0, 0]),
     ss: g.seriesStats || g.players.map(() => [0, 0, 0]),
     lg: g.log.slice(-30).map((l) => l.m),
@@ -1021,6 +1052,8 @@ function unpack(o) {
     sevenAt: o.sa || 0,
     duckAt: o.da || 0,
     duckTo: o.dt || [],
+    duckKind: MASCOTS[o.dk] ? o.dk : "duck",
+    duckWord: (o.dw || "").slice(0, WORD_MAX),
     chat: (o.cm || []).map(([p, m]) => ({ p, m })),
     phase: PH_LIST[o.ph],
     setupOrder: order, setupIdx: o.si,
@@ -1048,7 +1081,7 @@ function unpack(o) {
     arena: { id: (o.ar && o.ar[0]) || "", name: (o.ar && o.ar[1]) || "" },
     gameNo: o.gn || 1,
     appV: o.av || 0,
-    rules: o.ru ? { win: o.ru[0] || 10, friendly: !!o.ru[1], classic: !!o.ru[2], mascot: MASCOT_LIST[o.ru[3]] || "duck" } : { win: 10, friendly: false, classic: false, mascot: "duck" },
+    rules: o.ru ? { win: o.ru[0] || 10, friendly: !!o.ru[1], classic: !!o.ru[2] } : { win: 10, friendly: false, classic: false },
     stats: o.st || o.n.map(() => [0, 0, 0]),
     seriesStats: o.ss || o.n.map(() => [0, 0, 0]),
     log: o.lg.map((m) => ({ t: 0, m })),
@@ -1186,6 +1219,20 @@ function playQuack(mascot = "duck") {
     const ctx = window.__hbAC;
     if (ctx.state === "suspended") ctx.resume().catch(() => {});
     const t0 = ctx.currentTime;
+    const tone = (type, f0, f1, dt, dur, vol, wob) => {
+      const o = ctx.createOscillator(), gn = ctx.createGain();
+      o.type = type; o.frequency.setValueAtTime(f0, t0 + dt);
+      o.frequency.exponentialRampToValueAtTime(f1, t0 + dt + dur);
+      if (wob) { const l = ctx.createOscillator(), lg = ctx.createGain(); l.frequency.setValueAtTime(wob[0], t0); lg.gain.setValueAtTime(wob[1], t0); l.connect(lg); lg.connect(o.frequency); l.start(t0 + dt); l.stop(t0 + dt + dur + 0.05); }
+      gn.gain.setValueAtTime(0.0001, t0 + dt);
+      gn.gain.exponentialRampToValueAtTime(vol, t0 + dt + 0.03);
+      gn.gain.exponentialRampToValueAtTime(0.0001, t0 + dt + dur);
+      o.connect(gn); gn.connect(ctx.destination);
+      o.start(t0 + dt); o.stop(t0 + dt + dur + 0.05);
+    };
+    if (mascot === "goat") { tone("sawtooth", 440, 330, 0, 0.55, 0.2, [9, 25]); return; }       // a wobbly bleat
+    if (mascot === "gull") { tone("triangle", 1500, 900, 0, 0.14, 0.18); tone("triangle", 1400, 800, 0.17, 0.16, 0.18); return; } // two sharp cries
+    if (mascot === "heli") { tone("square", 70, 65, 0, 0.9, 0.1, [11, 30]); return; }            // chopping rotor
     if (mascot === "drone") {
       // a rotor buzz: low square wave with a wobble, swelling then fading
       const o = ctx.createOscillator(), gn = ctx.createGain(), lfo = ctx.createOscillator(), lg = ctx.createGain();
@@ -1320,7 +1367,7 @@ const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght
 const dispFont = "'Oswald', 'Helvetica Neue', sans-serif";
 const bodyFont = "'Spectral', Georgia, serif";
 
-function Btn({ children, onClick, disabled, tone = "plain", style }) {
+function Btn({ children, onClick, disabled, tone = "plain", style, title }) {
   const tones = {
     plain: { bg: "rgba(255,255,255,.06)", fg: C.parch, bd: C.line },
     go: { bg: C.gold, fg: "#20160a", bd: C.gold },
@@ -1328,7 +1375,7 @@ function Btn({ children, onClick, disabled, tone = "plain", style }) {
   };
   const t = tones[tone];
   return (
-    <button onClick={onClick} disabled={disabled} style={{
+    <button onClick={onClick} disabled={disabled} title={title} style={{
       background: disabled ? "rgba(255,255,255,.03)" : t.bg,
       color: disabled ? "rgba(239,230,210,.28)" : t.fg,
       border: `1px solid ${disabled ? "rgba(255,255,255,.07)" : t.bd}`,
@@ -1408,6 +1455,25 @@ function Die({ n, hot }) {
   );
 }
 
+/* a road, town, city or dev card as a small icon in a player's colour */
+function PieceIcon({ kind, color, size = 26 }) {
+  const gid = "pi-" + kind + "-" + color;
+  const fill = color === MULTI ? `url(#${gid})` : (PC[color] || PC[0]).hex;
+  const edge = "rgba(6,20,25,.75)";
+  return (
+    <svg width={size} height={size} viewBox="0 0 20 20" style={{ display: "block", margin: "0 auto" }}>
+      {color === MULTI && (
+        <linearGradient id={gid} x1="0" y1="1" x2="1" y2="0">
+          {RAINBOW.map((c, k) => <stop key={k} offset={`${(k * 100) / (RAINBOW.length - 1)}%`} stopColor={c} />)}
+        </linearGradient>
+      )}
+      {kind === "road" && <rect x="2" y="7.5" width="16" height="5" rx="2.5" fill={fill} stroke={edge} strokeWidth="0.8" transform="rotate(-30 10 10)" />}
+      {kind === "town" && <polygon points="4,17 4,9 10,3.5 16,9 16,17" fill={fill} stroke={edge} strokeWidth="0.8" />}
+      {kind === "city" && <g><rect x="2.5" y="10" width="15" height="7.5" fill={fill} stroke={edge} strokeWidth="0.8" /><polygon points="2.5,10 7.5,4 12.5,10" fill={fill} stroke={edge} strokeWidth="0.8" /></g>}
+      {kind === "dev" && <g><rect x="5" y="2.5" width="10" height="15" rx="1.5" fill={fill} stroke={edge} strokeWidth="0.8" /><text x="10" y="13.6" textAnchor="middle" fontSize="9" fontFamily={dispFont} fontWeight="600" fill="rgba(6,20,25,.8)">?</text></g>}
+    </svg>
+  );
+}
 function Eyebrow({ children }) {
   return <div style={{ fontFamily: dispFont, fontSize: 10, letterSpacing: ".22em",
     textTransform: "uppercase", color: C.parchDim, marginBottom: 6 }}>{children}</div>;
@@ -1704,6 +1770,8 @@ export default function App() {
   const [lobby, setLobby] = useState(null);
   const [others, setOthers] = useState([]);
   const [chatSeen, setChatSeen] = useState(0);
+  const [mascotPick, setMascotPick] = useState(() => myMascot());
+  const [extended, setExtended] = useState(() => myExtended());
 
   /* remember how much of the chat this phone has read */
   useEffect(() => {
@@ -1946,13 +2014,14 @@ export default function App() {
   /* a friendly quack (or buzz) at whoever the game is waiting on */
   const sendGull = async () => {
     const cur = gRef.current;
-    const M = mascotOf(cur);
+    const kind = myMascot(), word = myWord();
+    const M = MASCOTS[kind];
     const targets = cur.phase === "discard" ? Object.keys(cur.pendingDiscard).map(Number) : [cur.turn];
     try {
       const r = await fetch(new URL("/api/poke/" + cur.code, window.location.href), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to: targets, by: actor != null ? pname(cur, actor) : "A spectator", mascot: cur.rules?.mascot || "duck" }),
+        body: JSON.stringify({ to: targets, by: actor != null ? pname(cur, actor) : "A spectator", mascot: kind, word }),
       });
       const j = await r.json();
       // the mascot is a public event: it circles the island on every phone
@@ -1961,6 +2030,8 @@ export default function App() {
       await apply((d) => {
         d.duckAt = Date.now();
         d.duckTo = targets;
+        d.duckKind = kind;
+        d.duckWord = word;
         say(d, `${M.emoji} ${by} sent a ${M.noun} after ${who}.`);
       }, true);
       const Noun = M.noun[0].toUpperCase() + M.noun.slice(1);
@@ -1986,12 +2057,12 @@ export default function App() {
     if (!g || g.winner != null || !g.duckAt) return;
     if (g.duckAt !== lastQuack.current && Date.now() - g.duckAt < 45000) {
       lastQuack.current = g.duckAt;
-      playQuack(g.rules?.mascot);
+      playQuack(g.duckKind);
     }
     const mine = seat != null && (g.duckTo || []).includes(seat) &&
       (g.turn === seat || (g.pendingDiscard[seat] || 0) > 0);
     if (!mine) return;
-    const id = setInterval(() => playQuack(g.rules?.mascot), 3000);
+    const id = setInterval(() => playQuack(g.duckKind), 3000);
     return () => clearInterval(id);
   }, [g, seat]);
 
@@ -2639,7 +2710,7 @@ export default function App() {
             pointerEvents: "none", textAlign: "center" }}>
             <div style={{ background: C.parch, color: "#20262b", fontFamily: dispFont, fontSize: 12,
               letterSpacing: ".14em", padding: "3px 9px", borderRadius: 6, marginBottom: 2,
-              boxShadow: "0 2px 5px rgba(0,0,0,.45)" }}>{mascotOf(g).bubble}</div>
+              boxShadow: "0 2px 5px rgba(0,0,0,.45)" }}>{bubbleOf(g)}</div>
             <span className="hb-flap" style={{ fontSize: 30, filter: "drop-shadow(0 2px 3px rgba(0,0,0,.5))" }}>{mascotOf(g).emoji}</span>
           </div>
         )}
@@ -2680,8 +2751,11 @@ export default function App() {
               onClick={() => apply((d) => endTurn(d))}>End turn</Btn>
           )}
           {!myTurn && g.winner == null && owed === 0 && g.players[g.turn]?.claimed && (
-            <Btn style={{ marginLeft: "auto", padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
-              onClick={sendGull}>{mascotOf(g).emoji} Send a {mascotOf(g).noun}</Btn>
+            <Btn title="pick-mascot" onClick={() => setModal({ k: "mascot" })} style={{ marginLeft: "auto", padding: "8px 10px", fontSize: 12, flexShrink: 0 }}>▾</Btn>
+          )}
+          {!myTurn && g.winner == null && owed === 0 && g.players[g.turn]?.claimed && (
+            <Btn style={{ padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
+              onClick={sendGull}>{MASCOTS[mascotPick].emoji} Send a {MASCOTS[mascotPick].noun}</Btn>
           )}
         </div>
         {g.rolls.length > 1 && (
@@ -2692,7 +2766,7 @@ export default function App() {
             ))}
           </div>
         )}
-        {note && <div style={{ marginTop: 6, color: note.startsWith("You stole") || note.startsWith("🦆") || note.startsWith("🛸") || note.includes("accepted your trade") ? C.gold : "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
+        {note && <div style={{ marginTop: 6, color: note.startsWith("You stole") || MASCOT_LIST.some((m) => note.startsWith(MASCOTS[m].emoji)) || note.includes("accepted your trade") ? C.gold : "#f0b9a8", fontSize: 13, lineHeight: 1.4 }}>{note}</div>}
       </div>
 
       {/* the ship's chat and the log, one line each, always in view — tap to open */}
@@ -2729,7 +2803,13 @@ export default function App() {
       {/* your hand rides directly under the board — the thing you check most */}
       {actor != null && (
         <div style={{ padding: "10px 14px", borderBottom: `1px solid ${C.line}`, background: "rgba(255,255,255,.02)" }}>
-          <Eyebrow>Your hand — {handTotal(hand)} cards</Eyebrow>
+          <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+            <Eyebrow>Your hand — {handTotal(hand)} cards</Eyebrow>
+            <button title="extended-view" onClick={() => { rememberExtended(!extended); setExtended(!extended); }}
+              style={{ background: "transparent", border: "none", padding: "0 0 6px", cursor: "pointer", fontFamily: dispFont,
+                fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: extended ? C.gold : C.parchDim }}>
+              Extended view {extended ? "on" : "off"}</button>
+          </div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {RES.map((r) => <Chip key={r} res={r} n={hand[r]} />)}
           </div>
@@ -2751,10 +2831,10 @@ export default function App() {
                 return (
                   <button key={k} disabled={!ok} onClick={() => { setTab("build"); go(); }} style={{ flex: 1,
                     background: active ? "rgba(224,164,55,.28)" : ok ? "rgba(224,164,55,.12)" : "rgba(255,255,255,.03)",
-                    border: `1px solid ${ok ? C.gold : C.line}`, color: ok ? C.gold : C.parchDim, opacity: ok ? 1 : 0.5,
-                    borderRadius: 5, padding: "7px 2px", fontFamily: dispFont, fontSize: 11, letterSpacing: ".08em",
+                    border: `1px solid ${ok ? C.gold : C.line}`, color: ok ? C.gold : C.parchDim, opacity: ok ? 1 : 0.35,
+                    borderRadius: 5, padding: extended ? "7px 2px" : "6px 2px 4px", fontFamily: dispFont, fontSize: 11, letterSpacing: ".08em",
                     textTransform: "uppercase", cursor: ok ? "pointer" : "default" }}>
-                    {ok ? "✓ " : ""}{label}</button>
+                    {extended ? `${ok ? "✓ " : ""}${label}` : <PieceIcon kind={k} color={g.players[actor].color} />}</button>
                 );
               })}
             </div>
@@ -2858,7 +2938,14 @@ export default function App() {
               ))}
             </div>
 
-            {tab === "build" && (
+            {tab === "build" && !extended && (
+              <div style={{ color: C.parchDim, fontSize: 13, lineHeight: 1.5 }}>
+                {g.freeRoads > 0 && <div style={{ color: C.gold, marginBottom: 4 }}>Road building: {g.freeRoads} free left.</div>}
+                Tap a lit piece under your hand to build it.
+                {sel && <div style={{ color: C.gold, marginTop: 4 }}>Tap a highlighted spot on the board.</div>}
+              </div>
+            )}
+            {tab === "build" && extended && (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {g.freeRoads > 0 && <div style={{ color: C.gold, fontSize: 13 }}>Road building: {g.freeRoads} free left.</div>}
                 <BuildRow label="Road" cost="1 brick · 1 lumber" note={`${countOwned(g, actor, "road")}/15`}
@@ -2919,7 +3006,7 @@ export default function App() {
 
       </div>
 
-      {modal && <Modals modal={modal} setModal={setModal} g={g} actor={actor} hand={hand} apply={apply} owed={owed} setNote={setNote} />}
+      {modal && <Modals modal={modal} setModal={setModal} g={g} actor={actor} hand={hand} apply={apply} owed={owed} setNote={setNote} onMascot={setMascotPick} />}
     </div>
   );
 }
@@ -2950,7 +3037,7 @@ function DevList({ g, actor, devPlayable, apply, setModal }) {
   );
 }
 
-function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
+function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMascot }) {
   const [pick, setPick] = useState(emptyHand());
   const [give, setGive] = useState(emptyHand());
   const [want, setWant] = useState(emptyHand());
@@ -2963,13 +3050,15 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
   const [shooting, setShooting] = useState(false);
   const [secretWord, setSecretWord] = useState("");
   const [arenaName, setArenaName] = useState(g.arena?.name || "");
-  const [draftRules, setDraftRules] = useState({ win: 10, friendly: false, classic: false, mascot: "duck" });
+  const [draftRules, setDraftRules] = useState({ win: 10, friendly: false, classic: false });
+  const [pickKind, setPickKind] = useState(() => myMascot());
+  const [pickWord, setPickWord] = useState(() => myWord());
   useEffect(() => {
     setPick(emptyHand()); setGive(emptyHand()); setWant(emptyHand());
     setPlenty(emptyHand()); setPartner(null); setBankGive(null); setBankWant(null);
     setNewName(actor != null ? g.players[actor].name : ""); setSecretWord("");
     setArenaName(g.arena?.name || "");
-    setDraftRules({ win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic, mascot: g.rules?.mascot || "duck" });
+    setDraftRules({ win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic });
   }, [modal.k]);
   const close = () => setModal(null);
   const cap = (n) => ({ brick: n, lumber: n, wool: n, grain: n, ore: n });
@@ -3077,10 +3166,41 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
     );
   }
 
+  if (modal.k === "mascot") {
+    const M = MASCOTS[pickKind];
+    return (
+      <Sheet title="What you send" onClose={close}
+        footer={<Btn tone="go" style={{ flex: 1 }}
+          onClick={() => { rememberMascot(pickKind, pickWord.trim()); onMascot(pickKind); close(); }}>Save</Btn>}>
+        <Eyebrow>Your messenger</Eyebrow>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
+          {MASCOT_LIST.map((m) => {
+            const on = pickKind === m;
+            return (
+              <button key={m} title={"mascot-" + m} onClick={() => { setPickKind(m); playQuack(m); }} style={{ flex: "1 1 30%",
+                background: on ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+                border: `1px solid ${on ? C.gold : C.line}`, color: on ? C.gold : C.parchDim,
+                borderRadius: 5, padding: "10px 4px", fontFamily: dispFont, fontSize: 13, cursor: "pointer", textTransform: "capitalize" }}>
+                <span style={{ fontSize: 22, display: "block" }}>{MASCOTS[m].emoji}</span>{MASCOTS[m].noun}</button>
+            );
+          })}
+        </div>
+        <Eyebrow>What it says{pickWord.trim() ? "" : ` — ${M.bubble} unless you change it`}</Eyebrow>
+        <input value={pickWord} onChange={(e) => setPickWord(e.target.value.slice(0, WORD_MAX))} maxLength={WORD_MAX}
+          placeholder={M.bubble}
+          style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`,
+            borderRadius: 4, padding: "10px", color: C.parch, fontFamily: bodyFont, fontSize: 16, textTransform: "uppercase" }} />
+        <div style={{ marginTop: 10, color: C.parchDim, fontSize: 13, lineHeight: 1.5 }}>
+          Yours alone — everyone else picks their own. Tap a creature to hear it. The whole island sees and hears whatever you send.
+        </div>
+      </Sheet>
+    );
+  }
+
   if (modal.k === "rules") {
     const floor = minWinTarget(g);
-    const cur = { win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic, mascot: g.rules?.mascot || "duck" };
-    const changed = draftRules.win !== cur.win || draftRules.friendly !== cur.friendly || draftRules.classic !== cur.classic || draftRules.mascot !== cur.mascot;
+    const cur = { win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic };
+    const changed = draftRules.win !== cur.win || draftRules.friendly !== cur.friendly || draftRules.classic !== cur.classic;
     const toggle = (key, label, hint) => (
       <button onClick={() => setDraftRules((r) => ({ ...r, [key]: !r[key] }))} style={{ width: "100%", textAlign: "left",
         background: draftRules[key] ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
@@ -3107,19 +3227,6 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         </div>
         {toggle("classic", "Road-splitting towns", "classic Catan: a town may land mid-road and cut a longest road")}
         {toggle("friendly", "Friendly robber", "no robbing anyone below 3 points")}
-        <Eyebrow>What you send after a slow player</Eyebrow>
-        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-          {MASCOT_LIST.map((m) => {
-            const on = draftRules.mascot === m;
-            return (
-              <button key={m} onClick={() => setDraftRules((r) => ({ ...r, mascot: m }))} style={{ flex: 1,
-                background: on ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
-                border: `1px solid ${on ? C.gold : C.line}`, color: on ? C.gold : C.parchDim,
-                borderRadius: 5, padding: "9px 4px", fontFamily: dispFont, fontSize: 13, cursor: "pointer", textTransform: "capitalize" }}>
-                {MASCOTS[m].emoji} {MASCOTS[m].noun}s</button>
-            );
-          })}
-        </div>
         <div style={{ marginTop: 6, color: C.parchDim, fontSize: 13, lineHeight: 1.5 }}>
           Changes apply from now on, are announced in the log, and carry into every rematch.
           A target someone has already reached on the board can't be picked.
@@ -3269,7 +3376,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote }) {
         </div>
         {actor != null && g.winner == null && (
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 }}>
-            {[mascotOf(g).emoji, "🎲", "😂", "😭", "🔥", "🐑", "🧱", "🤝", "🏴‍☠️"].map((e) => (
+            {[MASCOTS[myMascot()].emoji, "🎲", "😂", "😭", "🔥", "🐑", "🧱", "🤝", "🏴‍☠️"].map((e) => (
               <button key={e} title={"emoji-" + e} onClick={() => apply((d) => sendChat(d, actor, e), true)}
                 style={{ background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 5,
                   padding: "5px 9px", fontSize: 18, cursor: "pointer" }}>{e}</button>

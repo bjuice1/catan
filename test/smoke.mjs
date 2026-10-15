@@ -61,6 +61,8 @@ const waitState = async (c, fn, ms = 6000) => {
 };
 
 let srv = spawnServer();
+// a crash mid-run must not leave the server squatting on the port
+process.on("uncaughtException", (e) => { console.log("CRASH", e.stack || e); try { srv.kill(); } catch { /* gone */ } process.exit(1); });
 let srvErr = "";
 srv.stderr.on("data", (c) => { srvErr += c; });
 {
@@ -191,7 +193,7 @@ check("setup completes into the roll phase",
 }
 
 // ---- turns: each phone acts on its own, server carries the moves ----
-let passes = 0, sevens = 0, discards = 0, robbers = 0, stripEnd = false, quickRow = false;
+let passes = 0, sevens = 0, discards = 0, robbers = 0, stripEnd = false, quickRow = false, simpleView = false;
 let deputyTried = false, deputyWorked = false;
 // the own-discard button is exactly "Discard N cards" — the deputy button
 // also contains the word "discard", so match precisely
@@ -241,7 +243,19 @@ for (let t = 0; t < 35; t++) {
     if (v) { tap(stealer, v); await sleep(240); }
   }
   const ender = phones.find((w) => btn(w, "End turn"));
-  if (ender && !quickRow) quickRow = !!ender.document.querySelector('[title="quick-build"]');
+  if (ender && !quickRow) {
+    quickRow = !!ender.document.querySelector('[title="quick-build"]');
+    // the extended-view toggle: off swaps the chip labels for piece icons in
+    // the mover's colour and hides the build tab's cost rows
+    const toggle = ender.document.querySelector('[title="extended-view"]');
+    if (quickRow && toggle) {
+      tap(ender, toggle); await sleep(80);
+      const q = ender.document.querySelector('[title="quick-build"]');
+      simpleView = !!q && q.querySelectorAll("svg").length === 4 && !H(ender).includes("1 brick · 1 lumber · 1 wool");
+      tap(ender, ender.document.querySelector('[title="extended-view"]')); await sleep(80);
+      simpleView = simpleView && !ender.document.querySelector('[title="quick-build"] svg') && ender.localStorage.getItem("harbor-view") === "full";
+    }
+  }
   // exactly one End turn, and it lives in the dice strip (before the tabs)
   if (ender && !stripEnd) {
     const h = H(ender);
@@ -251,6 +265,7 @@ for (let t = 0; t < 35; t++) {
 }
 check("turns advance across phones", passes > 15);
 check("the quick-build row sits under the hand on the mover's phone", quickRow);
+check("extended view off shows piece icons instead of the cost rows, and the choice sticks", simpleView);
 check("End turn also sits in the dice strip", stripEnd);
 check("sevens were resolved from each phone", sevens === 0 || discards >= sevens);
 check("a table-mate can discard for an away player", sevens === 0 || deputyWorked);
@@ -526,6 +541,21 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     check("the corner duck quacks on the sender's phone",
       await wait(waiter, (x) => H(x).includes("hb-quack"), 4000));
     check("the duck flaps its wings", H(waiter).includes("hb-flap"));
+    // each phone picks its own messenger; the pick rides with the poke so
+    // every island shows the sender's creature and its word
+    await wait(waiter, (x) => !!x.document.querySelector('[title="pick-mascot"]'), 3000);
+    tap(waiter, waiter.document.querySelector('[title="pick-mascot"]'));
+    await wait(waiter, (x) => !!x.document.querySelector('[title="mascot-goat"]'));
+    tap(waiter, waiter.document.querySelector('[title="mascot-goat"]'));
+    await wait(waiter, (x) => !!x.document.querySelector('input[placeholder="BAAAH"]'), 3000);
+    setInput(waiter, waiter.document.querySelector('input[placeholder="BAAAH"]'), "yallah");
+    await sleep(80);
+    click(waiter, "Save");
+    check("a phone can pick its own messenger", await wait(waiter, (x) => !!btn(x, "Send a goat"), 3000));
+    click(waiter, "Send a goat");
+    check("the goat and its word reach every island",
+      await waitState(code, (o) => o.dk === "goat" && o.dw === "yallah", 4000)
+      && await wait(phones.find((w) => w !== waiter), (x) => H(x).includes("YALLAH") && H(x).includes("🐐"), 4000));
     const bystander = phones.find((w) => w !== waiter);
     check("the corner duck quacks on every phone",
       await wait(bystander, (x) => H(x).includes("hb-quack"), 5000));
@@ -876,16 +906,13 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     await wait(otherW, (x) => !!btn(x, "Save rules"));
     click(otherW, "First to 12");
     click(otherW, "Road-splitting towns");
-    click(otherW, "drones");
     await sleep(80);
     click(otherW, "Save rules");
     check("house rules can be changed mid-game",
-      await waitState(newCode, (o) => o.ru[0] === 12 && o.ru[1] === 0 && o.ru[2] === 1 && o.ru[3] === 1));
-    check("the crew can fly drones instead of ducks",
-      await wait(otherW, (x) => !!btn(x, "Send a drone") || /Send a drone|🛸/.test(H(x)), 4000));
+      await waitState(newCode, (o) => o.ru[0] === 12 && o.ru[1] === 0 && o.ru[2] === 1));
     const ruled = await decodeState(newCode);
     check("a rules change is announced in the log",
-      ruled.lg.some((m) => m.includes("first to 12")) && ruled.lg.some((m) => m.includes("road-splitting towns on")) && ruled.lg.some((m) => m.includes("drones")));
+      ruled.lg.some((m) => m.includes("first to 12")) && ruled.lg.some((m) => m.includes("road-splitting towns on")));
     check("a rules change leaves the tally and arena alone", ruled.ws === newS.ws && ruled.ar[1] === "Duck Pond");
     if (btn(otherW, "×")) click(otherW, "×");
 
