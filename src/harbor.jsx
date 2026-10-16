@@ -361,6 +361,7 @@ function newGame(code, names) {
     duckTo: [],
     duckKind: "duck", // what was last sent, so every island shows the same creature
     duckWord: "",
+    duckPhoto: "", // the photo messenger's upload id for this game
     chat: [], // {p, m} — last 40 messages ride in the blob
     rules: { win: 10, friendly: false, classic: false },
     stats: names.map(() => [0, 0, 0]),       // gained, stolen, sevens (this game)
@@ -404,13 +405,66 @@ const MASCOTS = {
   goat: { emoji: "🐐", noun: "goat", bubble: "BAAAH", cry: "scream", fly: "get going", idle: "screaming at" },
   gull: { emoji: "🦅", noun: "seagull", bubble: "SQUAWK", cry: "squawk", fly: "take off", idle: "circling" },
   heli: { emoji: "🚁", noun: "helicopter", bubble: "WHUP WHUP", cry: "chop", fly: "lift off", idle: "hovering over" },
+  photo: { emoji: "📸", noun: "mugshot", bubble: "OI!", cry: "holler", fly: "get going", idle: "glaring at" },
 };
-const MASCOT_LIST = ["duck", "drone", "goat", "gull", "heli"];
+const MASCOT_LIST = ["duck", "drone", "goat", "gull", "heli", "photo"];
 const WORD_MAX = 12;
 /* this phone's pick — a preference, not game state */
 function myMascot() {
-  try { const m = window.localStorage.getItem("harbor-mascot"); return MASCOTS[m] ? m : "duck"; } catch { return "duck"; }
+  try {
+    const m = window.localStorage.getItem("harbor-mascot");
+    if (m === "photo" && !myPhoto()) return "duck"; // the picture was cleared with the browser data
+    return MASCOTS[m] ? m : "duck";
+  } catch { return "duck"; }
 }
+/* the photo messenger: any picture, shrunk on the phone to a small square
+   and kept in localStorage like the other picks. It is uploaded through the
+   chat-photo endpoint the first time it is sent in a game; only that short
+   id travels in the blob, so every island fetches the same picture. */
+const PHOTO_PX = 160;
+function myPhoto() {
+  try { return window.localStorage.getItem("harbor-mascot-photo") || ""; } catch { return ""; }
+}
+function rememberPhoto(dataUrl) {
+  try {
+    window.localStorage.setItem("harbor-mascot-photo", dataUrl);
+    window.localStorage.setItem("harbor-mascot-photo-v", String(Date.now())); // a new picture needs a new upload
+  } catch { /* best effort */ }
+}
+const photoVersion = () => { try { return window.localStorage.getItem("harbor-mascot-photo-v") || "0"; } catch { return "0"; } };
+async function photoIdFor(code) {
+  const dataUrl = myPhoto();
+  if (!dataUrl) return null;
+  const key = "harbor-mascot-photo-id-" + code, v = photoVersion();
+  try { const c = window.localStorage.getItem(key); if (c && c.startsWith(v + ":")) return c.slice(v.length + 1); } catch { /* re-upload */ }
+  const blob = await (await fetch(dataUrl)).blob();
+  const r = await fetch(new URL("/api/photo/" + code, window.location.href), {
+    method: "POST", headers: { "Content-Type": "image/jpeg" }, body: blob,
+  });
+  if (!r.ok) return null;
+  const { id } = await r.json();
+  try { window.localStorage.setItem(key, v + ":" + id); } catch { /* next send uploads again */ }
+  return id;
+}
+/* centre-crop to a square and shrink — a face at 160px is ~6 KB of JPEG */
+async function shrinkPhoto(file) {
+  const dataUrl = await new Promise((ok, no) => {
+    const fr = new window.FileReader();
+    fr.onload = () => ok(fr.result); fr.onerror = no; fr.readAsDataURL(file);
+  });
+  const img = await new Promise((ok, no) => {
+    const el = new window.Image();
+    el.onload = () => ok(el); el.onerror = no; el.src = dataUrl;
+  });
+  const side = Math.min(img.width, img.height);
+  const cv = document.createElement("canvas");
+  cv.width = PHOTO_PX; cv.height = PHOTO_PX;
+  cv.getContext("2d").drawImage(img, (img.width - side) / 2, (img.height - side) / 2, side, side, 0, 0, PHOTO_PX, PHOTO_PX);
+  return cv.toDataURL("image/jpeg", 0.8);
+}
+const canShrink = () => {
+  try { return typeof window.FileReader === "function" && !!document.createElement("canvas").getContext("2d"); } catch { return false; }
+};
 function myWord() {
   try { return (window.localStorage.getItem("harbor-mascot-word") || "").slice(0, WORD_MAX); } catch { return ""; }
 }
@@ -981,6 +1035,7 @@ function pack(g) {
     dt: g.duckTo || [],
     dk: g.duckKind || "duck",
     dw: g.duckWord || "",
+    dph: g.duckPhoto || "",
     cm: (g.chat || []).map((c) => [c.p, c.m]),
     tr: g.trade ? [g.trade.from, g.trade.to, ...RES.map((r) => g.trade.give[r] || 0), ...RES.map((r) => g.trade.want[r] || 0), g.trade.at || 0] : 0,
     ph: PH_LIST.indexOf(g.phase),
@@ -1054,6 +1109,7 @@ function unpack(o) {
     duckTo: o.dt || [],
     duckKind: MASCOTS[o.dk] ? o.dk : "duck",
     duckWord: (o.dw || "").slice(0, WORD_MAX),
+    duckPhoto: /^[a-z0-9]{6,16}$/.test(o.dph || "") ? o.dph : "",
     chat: (o.cm || []).map(([p, m]) => ({ p, m })),
     phase: PH_LIST[o.ph],
     setupOrder: order, setupIdx: o.si,
@@ -1233,6 +1289,7 @@ function playQuack(mascot = "duck") {
     if (mascot === "goat") { tone("sawtooth", 440, 330, 0, 0.55, 0.2, [9, 25]); return; }       // a wobbly bleat
     if (mascot === "gull") { tone("triangle", 1500, 900, 0, 0.14, 0.18); tone("triangle", 1400, 800, 0.17, 0.16, 0.18); return; } // two sharp cries
     if (mascot === "heli") { tone("square", 70, 65, 0, 0.9, 0.1, [11, 30]); return; }            // chopping rotor
+    if (mascot === "photo") { tone("triangle", 500, 1150, 0, 0.16, 0.18); tone("triangle", 1150, 420, 0.2, 0.26, 0.18); return; } // a wolf whistle
     if (mascot === "drone") {
       // a rotor buzz: low square wave with a wobble, swelling then fading
       const o = ctx.createOscillator(), gn = ctx.createGain(), lfo = ctx.createOscillator(), lg = ctx.createGain();
@@ -2021,6 +2078,11 @@ export default function App() {
     const M = MASCOTS[kind];
     const targets = cur.phase === "discard" ? Object.keys(cur.pendingDiscard).map(Number) : [cur.turn];
     try {
+      let photoId = "";
+      if (kind === "photo") {
+        photoId = await photoIdFor(cur.code);
+        if (!photoId) { setNote("📸 Your mugshot couldn't board — the album may be full for this game."); return; }
+      }
       const r = await fetch(new URL("/api/poke/" + cur.code, window.location.href), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2035,6 +2097,7 @@ export default function App() {
         d.duckTo = targets;
         d.duckKind = kind;
         d.duckWord = word;
+        d.duckPhoto = photoId;
         say(d, `${M.emoji} ${by} sent a ${M.noun} after ${who}.`);
       }, true);
       const Noun = M.noun[0].toUpperCase() + M.noun.slice(1);
@@ -2716,7 +2779,13 @@ export default function App() {
             <div style={{ background: C.parch, color: "#20262b", fontFamily: dispFont, fontSize: 12,
               letterSpacing: ".14em", padding: "3px 9px", borderRadius: 6, marginBottom: 2,
               boxShadow: "0 2px 5px rgba(0,0,0,.45)" }}>{bubbleOf(g)}</div>
-            <span className="hb-flap" style={{ fontSize: 30, filter: "drop-shadow(0 2px 3px rgba(0,0,0,.5))" }}>{mascotOf(g).emoji}</span>
+            {g.duckKind === "photo" && g.duckPhoto ? (
+              <img className="hb-flap" title="mascot-photo" alt="" src={"/api/photo/" + g.code + "/" + g.duckPhoto}
+                style={{ width: 48, height: 48, borderRadius: "50%", objectFit: "cover", display: "block", margin: "0 auto",
+                  border: `2px solid ${C.gold}`, boxShadow: "0 2px 5px rgba(0,0,0,.5)" }} />
+            ) : (
+              <span className="hb-flap" style={{ fontSize: 30, filter: "drop-shadow(0 2px 3px rgba(0,0,0,.5))" }}>{mascotOf(g).emoji}</span>
+            )}
           </div>
         )}
       </div>
@@ -2770,7 +2839,9 @@ export default function App() {
           )}
           {!myTurn && g.winner == null && owed === 0 && g.players[g.turn]?.claimed && (
             <Btn title={`send-${mascotPick}`} style={{ padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
-              onClick={sendGull}>{MASCOTS[mascotPick].emoji} Send</Btn>
+              onClick={sendGull}>{mascotPick === "photo" && myPhoto()
+                ? <img src={myPhoto()} alt="" style={{ width: 16, height: 16, borderRadius: "50%", objectFit: "cover", verticalAlign: "-3px" }} />
+                : MASCOTS[mascotPick].emoji} Send</Btn>
           )}
         </div>
         {g.rolls.length > 1 && (
@@ -3079,6 +3150,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
   const [draftRules, setDraftRules] = useState({ win: 10, friendly: false, classic: false });
   const [pickKind, setPickKind] = useState(() => myMascot());
   const [pickWord, setPickWord] = useState(() => myWord());
+  const [pickPhoto, setPickPhoto] = useState(() => myPhoto());
   useEffect(() => {
     setPick(emptyHand()); setGive(emptyHand()); setWant(emptyHand());
     setPlenty(emptyHand()); setPartner(null); setBankGive(modal.give || null); setBankWant(null);
@@ -3194,6 +3266,13 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
 
   if (modal.k === "mascot") {
     const M = MASCOTS[pickKind];
+    const takePhoto = async (file) => {
+      if (!file || !canShrink()) return;
+      try {
+        const d = await shrinkPhoto(file);
+        rememberPhoto(d); setPickPhoto(d); setPickKind("photo"); playQuack("photo");
+      } catch { setNote("That picture didn't survive the trip — try another."); }
+    };
     return (
       <Sheet title="What you send" onClose={close}
         footer={<Btn tone="go" style={{ flex: 1 }}
@@ -3202,22 +3281,40 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14 }}>
           {MASCOT_LIST.map((m) => {
             const on = pickKind === m;
+            const tile = { flex: "1 1 30%", textAlign: "center", boxSizing: "border-box",
+              background: on ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+              border: `1px solid ${on ? C.gold : C.line}`, color: on ? C.gold : C.parchDim,
+              borderRadius: 5, padding: "10px 4px", fontFamily: dispFont, fontSize: 13, cursor: "pointer", textTransform: "capitalize" };
+            const face = m === "photo" && pickPhoto
+              ? <img src={pickPhoto} alt="" style={{ width: 30, height: 30, borderRadius: "50%", objectFit: "cover", display: "block", margin: "0 auto 2px" }} />
+              : <span style={{ fontSize: 22, display: "block" }}>{MASCOTS[m].emoji}</span>;
+            /* no picture yet: the tile is the camera / photo picker itself */
+            if (m === "photo" && !pickPhoto) return (
+              <label key={m} title="mascot-photo" style={tile}>
+                {face}{MASCOTS[m].noun}
+                <input type="file" accept="image/*" hidden onChange={(e) => { takePhoto(e.target.files[0]); e.target.value = ""; }} />
+              </label>
+            );
             return (
-              <button key={m} title={"mascot-" + m} onClick={() => { setPickKind(m); playQuack(m); }} style={{ flex: "1 1 30%",
-                background: on ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
-                border: `1px solid ${on ? C.gold : C.line}`, color: on ? C.gold : C.parchDim,
-                borderRadius: 5, padding: "10px 4px", fontFamily: dispFont, fontSize: 13, cursor: "pointer", textTransform: "capitalize" }}>
-                <span style={{ fontSize: 22, display: "block" }}>{MASCOTS[m].emoji}</span>{MASCOTS[m].noun}</button>
+              <button key={m} title={"mascot-" + m} onClick={() => { setPickKind(m); playQuack(m); }} style={tile}>
+                {face}{MASCOTS[m].noun}</button>
             );
           })}
         </div>
+        {pickPhoto && (
+          <label title="mascot-photo-retake" style={{ display: "inline-block", marginTop: -6, marginBottom: 14, color: C.parchDim, fontFamily: dispFont,
+            fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", cursor: "pointer" }}>
+            📸 Change the mugshot
+            <input type="file" accept="image/*" hidden onChange={(e) => { takePhoto(e.target.files[0]); e.target.value = ""; }} />
+          </label>
+        )}
         <Eyebrow>What it says{pickWord.trim() ? "" : ` — ${M.bubble} unless you change it`}</Eyebrow>
         <input value={pickWord} onChange={(e) => setPickWord(e.target.value.slice(0, WORD_MAX))} maxLength={WORD_MAX}
           placeholder={M.bubble}
           style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`,
             borderRadius: 4, padding: "10px", color: C.parch, fontFamily: bodyFont, fontSize: 16, textTransform: "uppercase" }} />
         <div style={{ marginTop: 10, color: C.parchDim, fontSize: 13, lineHeight: 1.5 }}>
-          Yours alone — everyone else picks their own. Tap a creature to hear it. The whole island sees and hears whatever you send.
+          Yours alone — everyone else picks their own. Tap a creature to hear it; the mugshot takes a photo or picks one, cropped square and kept only on this phone until you send it. The whole island sees and hears whatever you send.
         </div>
       </Sheet>
     );
@@ -3375,7 +3472,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
               onKeyDown={(e) => { if (e.key === "Enter") send(); }}
               style={{ flex: 1, minWidth: 0, background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4,
                 padding: "10px", color: C.parch, fontFamily: bodyFont, fontSize: 16 }} />
-            <Btn tone="go" disabled={!chatText.trim()} onClick={send}>Send</Btn>
+            <Btn tone="go" title="chat-send" disabled={!chatText.trim()} onClick={send}>Send</Btn>
           </>
         ) : undefined}>
         {(g.chat || []).length === 0 && (

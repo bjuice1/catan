@@ -587,6 +587,28 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     const bystander = phones.find((w) => w !== waiter);
     check("the corner duck quacks on every phone",
       await wait(bystander, (x) => H(x).includes("hb-quack"), 5000));
+
+    // the photo messenger: jsdom has no canvas to shrink a picture, so one is
+    // seeded straight into storage; it is picked in the sheet, uploaded once
+    // through the chat-photo endpoint, and shown as a round picture everywhere
+    const TINY_JPEG = "data:image/jpeg;base64," + Buffer.from([0xff, 0xd8, 0xff, 0xd9]).toString("base64");
+    waiter.localStorage.setItem("harbor-mascot-photo", TINY_JPEG);
+    waiter.localStorage.setItem("harbor-mascot-photo-v", "7");
+    tap(waiter, waiter.document.querySelector('[title="pick-mascot"]'));
+    await wait(waiter, (x) => !!x.document.querySelector('button[title="mascot-photo"]'), 3000);
+    check("a stored photo shows as a pickable tile", !!waiter.document.querySelector('button[title="mascot-photo"] img'));
+    tap(waiter, waiter.document.querySelector('button[title="mascot-photo"]'));
+    await sleep(80);
+    click(waiter, "Save");
+    check("the send button wears the photo", await wait(waiter, (x) => !!x.document.querySelector('[title="send-photo"] img'), 3000));
+    tap(waiter, sendBtn(waiter, "photo"));
+    let photoId = null;
+    check("the photo uploads and its id rides in the blob",
+      await waitState(code, (o) => { if (o.dk === "photo" && /^[a-z0-9]{10}$/.test(o.dph || "")) { photoId = o.dph; return true; } return false; }, 5000));
+    check("the uploaded photo is served back", !!photoId && (await fetch(BASE + "api/photo/" + code + "/" + photoId)).ok);
+    check("the photo circles every island as a round picture",
+      !!photoId && await wait(bystander, (x) => !!x.document.querySelector(`img[title="mascot-photo"][src*="${photoId}"]`), 4000));
+    check("the upload is remembered for the next send", waiter.localStorage.getItem("harbor-mascot-photo-id-" + code) === "7:" + photoId);
   }
 
   // ---- ship's chat ----
@@ -596,14 +618,14 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     const box = [...A.document.querySelectorAll("input")].find((el) => el.placeholder.includes("whole table"));
     setInput(A, box, "ahoy the harbor");
     await sleep(80);
-    // exact match: plain btn("Send") would hit "Send a duck" in the strip;
+    // the chat Send is picked by title: the dice strip has its own Send;
     // retap if the in-flight guard swallowed it
     // NOTE: the push test above deliberately PUT a bumped v around a stale
     // blob — the divergence that once deadlocked every later write. Chat
     // landing here proves clients self-heal from it (server's v wins).
     let sentChat = false;
     for (let t = 0; t < 3 && !sentChat; t++) {
-      tap(A, [...A.document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Send"));
+      tap(A, A.document.querySelector('[title="chat-send"]'));
       sentChat = await waitState(code, (o) => (o.cm || []).some(([, m]) => m === "ahoy the harbor"), 2500);
     }
     check("a chat message lands in the game state (post-divergence self-heal)", sentChat);

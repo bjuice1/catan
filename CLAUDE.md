@@ -90,6 +90,12 @@ test/smoke.mjs    Real server + four jsdom phones. See below.
   travels in the blob is only what was last *sent* (`duckKind`/`duckWord`,
   `dk`/`dw`), so every island shows the sender's creature. Same for the
   extended-view toggle (`harbor-view`): purely local.
+- **The photo messenger (`photo` / "mugshot") is a picture, not an emoji.**
+  It is shrunk to a 160px square on the phone and kept in localStorage
+  (`harbor-mascot-photo`); the first send in a game uploads it through the
+  chat-photo endpoint and caches the id per code, and only that id travels
+  in the blob (`dph`). Albums burn with the game, so the next game simply
+  re-uploads. `dp` is already the dev-card-played flag — don't reuse it.
 
 ## Rules coverage
 

@@ -323,6 +323,7 @@ http.createServer((req, res) => {
     goat: { emoji: "🐐", noun: "goat", cry: "Baaah" },
     gull: { emoji: "🦅", noun: "seagull", cry: "Squawk" },
     heli: { emoji: "🚁", noun: "helicopter", cry: "Whup whup" },
+    photo: { emoji: "📸", noun: "mugshot", cry: "Oi" },
   };
   const pk = u.pathname.match(/^\/api\/poke\/([A-Z0-9]{4,8})$/);
   if (pk && req.method === "POST") {
