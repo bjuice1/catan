@@ -864,6 +864,12 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
       !!strip && strip.textContent.includes("🦆") && /CHAT \d/.test(strip.textContent));
     check("the latest log line shows under the board",
       (Q.document.querySelector('[title="log-strip"]') || {}).textContent?.length > 10);
+
+    // send a creature in this game too, so the rematch check below has
+    // something that must NOT follow the crew into the next island
+    const sender = [P, Q].find((w) => w.document.querySelector('[title^="send-"]'));
+    if (sender) tap(sender, sender.document.querySelector('[title^="send-"]'));
+    check("a creature was sent in the game about to end", !!sender && await waitState(codeW, (o) => o.da > 0, 4000));
   }
 
   // name the arena in game one — it has to follow the crew into the rematch
@@ -948,6 +954,10 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     check("the finished game records its rules in the history",
       newS.hi.length === 1 && /^\d:\d\d:10:0$/.test(newS.hi[0]));
     check("the win tally is untouched by the arena fields", newS.ws.split(",").map(Number).reduce((a, b) => a + b, 0) === 1);
+    // whatever was sent after someone in the old game stays there: the
+    // rematch starts with no creature, word or picture on its island
+    check("the messenger does not carry into the rematch",
+      !!oldS.da && !newS.da && (newS.dt || []).length === 0 && newS.dk === "duck" && !newS.dw && !newS.dph);
 
     // house rules can change mid-game, from inside the game
     click(otherW, "Log");
