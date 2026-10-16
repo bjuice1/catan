@@ -269,8 +269,7 @@ for (let t = 0; t < 35; t++) {
       const lit = bs.find((b) => b.classList.contains("hb-urgent") && !b.title.endsWith("-any"));
       if (lit && portGlow == null) {
         const res = lit.title.replace("port-", "");
-        const label = { brick: "Brick", lumber: "Wood", wool: "Bas", grain: "Wheat", ore: "Ore" }[res];
-        const n = +((H(ender).match(new RegExp(label + " <b[^>]*>(\\d+)</b>")) || [])[1] || 0);
+        const n = +(ender.document.querySelector(`[title="chip-${res}"] b`)?.textContent || 0);
         portGlow = n >= 2;
         tap(ender, lit); await sleep(80);
         portPreset = H(ender).includes("Trade with the bank")
@@ -561,10 +560,11 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   check("a duck to an unsubscribed player reports nowhere to land", g3.nosub === true);
 
   // and the button shows on a phone that's waiting
-  const waiter = phones.find((w) => btn(w, "Send a duck"));
-  check("a waiting phone offers Send a duck", !!waiter);
+  const sendBtn = (w, kind) => w.document.querySelector(`[title="send-${kind}"]`);
+  const waiter = phones.find((w) => sendBtn(w, "duck"));
+  check("a waiting phone offers to send a duck", !!waiter);
   if (waiter) {
-    click(waiter, "Send a duck");
+    tap(waiter, sendBtn(waiter, "duck"));
     check("the duck button reports back", await wait(waiter, (x) => /duck|land/i.test(H(x)), 4000));
     check("the corner duck quacks on the sender's phone",
       await wait(waiter, (x) => H(x).includes("hb-quack"), 4000));
@@ -579,8 +579,8 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     setInput(waiter, waiter.document.querySelector('input[placeholder="BAAAH"]'), "yallah");
     await sleep(80);
     click(waiter, "Save");
-    check("a phone can pick its own messenger", await wait(waiter, (x) => !!btn(x, "Send a goat"), 3000));
-    click(waiter, "Send a goat");
+    check("a phone can pick its own messenger", await wait(waiter, (x) => !!sendBtn(x, "goat"), 3000));
+    tap(waiter, sendBtn(waiter, "goat"));
     check("the goat and its word reach every island",
       await waitState(code, (o) => o.dk === "goat" && o.dw === "yallah", 4000)
       && await wait(phones.find((w) => w !== waiter), (x) => H(x).includes("YALLAH") && H(x).includes("🐐"), 4000));

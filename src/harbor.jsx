@@ -1478,13 +1478,16 @@ function Eyebrow({ children }) {
   return <div style={{ fontFamily: dispFont, fontSize: 10, letterSpacing: ".22em",
     textTransform: "uppercase", color: C.parchDim, marginBottom: 6 }}>{children}</div>;
 }
+/* one chip per resource, five across on any phone: icon and count on top,
+   the name in small caps beneath so the row never wraps */
 function Chip({ res, n }) {
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "rgba(255,255,255,.05)",
-      border: `1px solid ${C.line}`, borderRadius: 4, padding: "3px 7px", fontFamily: dispFont,
-      fontSize: 13, color: C.parch, letterSpacing: ".04em" }}>
-      <span>{RES_ICON[res]}</span>
-      {RES_LABEL[res]} <b style={{ fontWeight: 600 }}>{n}</b>
+    <span title={`chip-${res}`} style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center",
+      background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4, padding: "4px 2px 3px",
+      fontFamily: dispFont, color: C.parch }}>
+      <span style={{ fontSize: 14, lineHeight: 1.2, whiteSpace: "nowrap" }}>
+        {RES_ICON[res]} <b style={{ fontWeight: 600, fontSize: 16 }}>{n}</b></span>
+      <span style={{ fontSize: 9, letterSpacing: ".14em", textTransform: "uppercase", color: C.parchDim, marginTop: 1 }}>{RES_LABEL[res]}</span>
     </span>
   );
 }
@@ -1492,7 +1495,7 @@ function HandStrip({ hand }) {
   return (
     <div style={{ marginBottom: 14 }}>
       <Eyebrow>Your hand — {handTotal(hand)} cards</Eyebrow>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      <div style={{ display: "flex", gap: 6 }}>
         {RES.map((r) => <Chip key={r} res={r} n={hand[r]} />)}
       </div>
     </div>
@@ -2601,15 +2604,15 @@ export default function App() {
       if (!up.claimed) return `Waiting for someone to take ${up.name}'s seat — send them the invite link.`;
       if (g.phase === "discard") {
         const owing = Object.keys(g.pendingDiscard).map((p) => pname(g, +p)).join(", ");
-        return `Waiting for ${owing} to discard from the seven.`;
+        return `Waiting for ${owing} to discard.`;
       }
-      return `Waiting for ${up.name} — updates come through on their own.`;
+      return `Waiting for ${up.name}.`;
     }
     switch (g.phase) {
       case "setupTown": return "Tap a highlighted corner to found a town.";
       case "setupRoad": return "Now lay a road beside it.";
       case "roll": return "Roll the dice to start your turn.";
-      case "discard": return "Waiting for the others to discard from the seven.";
+      case "discard": return "Waiting for the others to discard.";
       case "robber": return "Tap a hex to move the robber.";
       case "steal": return "Choose someone to rob.";
       case "main": return "Build, trade, or end the turn.";
@@ -2766,8 +2769,8 @@ export default function App() {
             <Btn title="pick-mascot" onClick={() => setModal({ k: "mascot" })} style={{ marginLeft: "auto", padding: "8px 10px", fontSize: 12, flexShrink: 0 }}>▾</Btn>
           )}
           {!myTurn && g.winner == null && owed === 0 && g.players[g.turn]?.claimed && (
-            <Btn style={{ padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
-              onClick={sendGull}>{MASCOTS[mascotPick].emoji} Send a {MASCOTS[mascotPick].noun}</Btn>
+            <Btn title={`send-${mascotPick}`} style={{ padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
+              onClick={sendGull}>{MASCOTS[mascotPick].emoji} Send</Btn>
           )}
         </div>
         {g.rolls.length > 1 && (
@@ -2822,7 +2825,7 @@ export default function App() {
                 fontSize: 10, letterSpacing: ".18em", textTransform: "uppercase", color: extended ? C.gold : C.parchDim }}>
               Extended view {extended ? "on" : "off"}</button>
           </div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          <div style={{ display: "flex", gap: 6 }}>
             {RES.map((r) => <Chip key={r} res={r} n={hand[r]} />)}
           </div>
           {g.devHands[actor].filter((c) => !c.used).length > 0 && (
