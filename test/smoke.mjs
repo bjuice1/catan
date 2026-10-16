@@ -187,14 +187,17 @@ check("setup completes into the roll phase",
     !!roller && (H(roller).match(/Your turn, ([A-Za-z]+)/) || [])[1] === half[0]);
   if (roller) {
     const h = H(roller);
-    check("your hand sits above the action buttons",
-      h.indexOf("Your hand — ") > -1 && h.indexOf("Your hand — ") < h.indexOf(">Roll the dice<"));
+    // the roll button lives in the dice strip, right under the board — above the
+    // hand, so it never scrolls out of view on a phone
+    check("the roll button sits above your hand, in the dice strip",
+      h.indexOf("Your hand — ") > -1 && h.indexOf(">Roll the dice<") > -1 && h.indexOf(">Roll the dice<") < h.indexOf("Your hand — "));
   }
 }
 
 // ---- turns: each phone acts on its own, server carries the moves ----
 let passes = 0, sevens = 0, discards = 0, robbers = 0, stripEnd = false, quickRow = false, simpleView = false;
 let deputyTried = false, deputyWorked = false;
+let portRow = null, portGlow = null, portPreset = null;
 // the own-discard button is exactly "Discard N cards" — the deputy button
 // also contains the word "discard", so match precisely
 const owesBtn = (w) => [...w.document.querySelectorAll("button")]
@@ -256,6 +259,28 @@ for (let t = 0; t < 35; t++) {
       simpleView = simpleView && !ender.document.querySelector('[title="quick-build"] svg') && ender.localStorage.getItem("harbor-view") === "full";
     }
   }
+  // the port row under the hand: every button reads N:1, a lit one pulses and
+  // opens the bank sheet with that resource already on the give side
+  if (ender && portRow !== false) {
+    const row = ender.document.querySelector('[title="port-row"]');
+    if (row) {
+      const bs = [...row.querySelectorAll("button")];
+      portRow = bs.length > 0 && bs.every((b) => /[23]:1$/.test(b.textContent.trim()));
+      const lit = bs.find((b) => b.classList.contains("hb-urgent") && !b.title.endsWith("-any"));
+      if (lit && portGlow == null) {
+        const res = lit.title.replace("port-", "");
+        const label = { brick: "Brick", lumber: "Wood", wool: "Bas", grain: "Wheat", ore: "Ore" }[res];
+        const n = +((H(ender).match(new RegExp(label + " <b[^>]*>(\\d+)</b>")) || [])[1] || 0);
+        portGlow = n >= 2;
+        tap(ender, lit); await sleep(80);
+        portPreset = H(ender).includes("Trade with the bank")
+          && !!ender.document.querySelector(`[title="bank-give-${res} picked"]`);
+        // close the sheet by its × so the turn can end
+        const x = [...ender.document.querySelectorAll("button")].find((b) => b.textContent.trim() === "×");
+        if (x) { tap(ender, x); await sleep(60); }
+      }
+    }
+  }
   // exactly one End turn, and it lives in the dice strip (before the tabs)
   if (ender && !stripEnd) {
     const h = H(ender);
@@ -267,6 +292,9 @@ check("turns advance across phones", passes > 15);
 check("the quick-build row sits under the hand on the mover's phone", quickRow);
 check("extended view off shows piece icons instead of the cost rows, and the choice sticks", simpleView);
 check("End turn also sits in the dice strip", stripEnd);
+check("the port row under the hand lists each port as N:1", portRow !== false);
+check("a port only glows when the hand covers its rate", portGlow !== false);
+check("tapping a lit port opens the bank sheet with that resource on the give side", portPreset !== false);
 check("sevens were resolved from each phone", sevens === 0 || discards >= sevens);
 check("a table-mate can discard for an away player", sevens === 0 || deputyWorked);
 check("no phone was ever asked to send a link", !sawHandoffScreen);

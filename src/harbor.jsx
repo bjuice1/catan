@@ -2543,6 +2543,8 @@ export default function App() {
   const owed = actor != null ? g.pendingDiscard[actor] || 0 : 0;
   const myTurn = actor != null && g.turn === actor && g.winner == null;
   const canBuy = (k) => canAfford(hand, COST[k]);
+  /* ports you own, 2:1s first — the hand's port row and the bank sheet's rates */
+  const myPorts = actor != null ? [...portsFor(g, actor)].sort((a, b) => (a === "any") - (b === "any")) : [];
   /* before rolling, only a knight may be played; one dev card per turn */
   const devPlayable = (c) => myTurn && (g.phase === "main" || (g.phase === "roll" && c.type === "knight"))
     && !g.devPlayed && c.turn < g.turnNo && !c.used && c.type !== "vp";
@@ -2745,7 +2747,17 @@ export default function App() {
                 color: g.dice[0] + g.dice[1] === 7 ? C.rust : C.gold }}>{g.dice[0] + g.dice[1]}</span>
             </span>
           )}
-          <span style={{ fontSize: 15, lineHeight: 1.4 }}>{status}</span>
+          {/* the one thing you must do now sits here, under the board, never below the fold */}
+          {myTurn && g.phase === "roll" ? (
+            <Btn tone="go" style={{ flex: 1, padding: "14px", fontSize: 16 }}
+              onClick={() => apply((d) => rollDice(d))}>Roll the dice</Btn>
+          ) : (
+            <span style={{ fontSize: 15, lineHeight: 1.4 }}>{status}</span>
+          )}
+          {owed > 0 && (
+            <Btn tone="warn" style={{ marginLeft: "auto", padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
+              onClick={() => setModal({ k: "discard" })}>Discard {owed} cards</Btn>
+          )}
           {myTurn && g.phase === "main" && (
             <Btn tone="warn" style={{ marginLeft: "auto", padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
               onClick={() => apply((d) => endTurn(d))}>End turn</Btn>
@@ -2839,6 +2851,27 @@ export default function App() {
               })}
             </div>
           )}
+          {/* your ports: lit and pulsing when the hand covers the rate, dim when
+              it doesn't — a tap opens the bank sheet with that side filled in */}
+          {myTurn && g.phase === "main" && myPorts.length > 0 && (
+            <div title="port-row" style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+              {myPorts.map((pt) => {
+                const rate = pt === "any" ? 3 : 2;
+                const ready = pt === "any"
+                  ? RES.some((r) => tradeRate(g, actor, r) === 3 && hand[r] >= 3)
+                  : hand[pt] >= 2;
+                return (
+                  <button key={pt} title={`port-${pt}`} className={ready ? "hb-urgent" : undefined}
+                    onClick={() => setModal({ k: "bank", give: pt === "any" ? null : pt })} style={{ flex: 1,
+                    background: ready ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.03)",
+                    border: `1px solid ${ready ? C.gold : C.line}`, color: ready ? C.gold : C.parchDim, opacity: ready ? 1 : 0.45,
+                    borderRadius: 5, padding: "6px 4px", fontFamily: dispFont, fontSize: 11, letterSpacing: ".08em",
+                    textTransform: "uppercase", cursor: "pointer", whiteSpace: "nowrap" }}>
+                    ⚓ {pt === "any" ? "Any" : RES_LABEL[pt]} {rate}:1</button>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -2893,11 +2926,6 @@ export default function App() {
           </div>
         )}
 
-        {owed > 0 && (
-          <Btn tone="warn" style={{ width: "100%", marginBottom: 10 }}
-            onClick={() => setModal({ k: "discard" })}>Discard {owed} cards</Btn>
-        )}
-
         {/* someone wandered off mid-seven: after a long wait, anyone may throw
             random cards for them (it's announced in the log) */}
         {actor != null && g.phase === "discard" && g.sevenAt > 0 && now - g.sevenAt > (window.HARBOR_DEPUTY_MS || 600000) &&
@@ -2919,11 +2947,6 @@ export default function App() {
               ))}
             </div>
           </div>
-        )}
-
-        {myTurn && g.phase === "roll" && (
-          <Btn tone="go" style={{ width: "100%", padding: "14px", fontSize: 16 }}
-            onClick={() => apply((d) => rollDice(d))}>Roll the dice</Btn>
         )}
 
         {myTurn && g.phase === "main" && (
@@ -3055,7 +3078,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
   const [pickWord, setPickWord] = useState(() => myWord());
   useEffect(() => {
     setPick(emptyHand()); setGive(emptyHand()); setWant(emptyHand());
-    setPlenty(emptyHand()); setPartner(null); setBankGive(null); setBankWant(null);
+    setPlenty(emptyHand()); setPartner(null); setBankGive(modal.give || null); setBankWant(null);
     setNewName(actor != null ? g.players[actor].name : ""); setSecretWord("");
     setArenaName(g.arena?.name || "");
     setDraftRules({ win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic });
@@ -3537,7 +3560,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
           {RES.map((r) => {
             const dis = !filter(r);
             return (
-              <button key={r} disabled={dis} onClick={() => onSet(r)} style={{
+              <button key={r} disabled={dis} onClick={() => onSet(r)} title={`bank-${label === "Give" ? "give" : "want"}-${r}${value === r ? " picked" : ""}`} style={{
                 background: value === r ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
                 border: `1px solid ${value === r ? C.gold : C.line}`, borderRadius: 5, padding: "8px 10px",
                 color: dis ? "rgba(239,230,210,.25)" : C.parch, fontFamily: dispFont, fontSize: 12,
