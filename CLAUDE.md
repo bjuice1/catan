@@ -85,6 +85,16 @@ test/smoke.mjs    Real server + four jsdom phones. See below.
   road-splitting flag in force when the game ended; entries without them are
   first-to-10.
 
+- **Every 3rd game of an arena is a cup game** (`cupFor(gameNo)`, a pure
+  function — nothing about the schedule travels). It plays normally and the
+  winner still gets the ★; a 🏆 also goes to whoever leads the cup's stat at
+  the end (Harvest, Road, Knight, Pirate, Skyline, then the Crown, which
+  scores across all five; then they rotate). Every cup stat is public.
+  `trophies` (`tp`, omitted until someone has one) is folded at
+  `makeRematch` like `wins`, spliced wherever `wins` is, and cup games add
+  `:k:cw` to their history entry. Appending to `CUPS` is safe; reordering it
+  rewrites every arena's trophy shelf.
+
 - **The messenger (duck/drone/goat/gull/heli) is a per-phone pick, not game
   state** — `harbor-mascot` / `harbor-mascot-word` in localStorage. What
   travels in the blob is only what was last *sent* (`duckKind`/`duckWord`,

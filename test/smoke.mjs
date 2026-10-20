@@ -1011,6 +1011,42 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     check("a pre-arena blob still opens", put.ok && opened);
     const lstate = await decodeState("LGCY");
     check("opening a pre-arena blob does not rewrite it", lstate.ar === undefined && lstate.ws === newS.ws && lstate.hi[0].split(":").length === 2);
+    check("no trophy field rides along before anyone has won one", newS.tp === undefined);
+
+    // game 3 of an arena is the Harvest Cup. Seat 0 won the game, but seat 1
+    // gained more — the ★ and the 🏆 go to different people, and the trophy
+    // has to survive into game 4.
+    {
+      const cupG = { ...newS, c: "CUPS", q: 1, gn: 3, w: 0, ph: 7, rm: "", st: [[3, 0, 0], [9, 0, 0]] };
+      const cblob = "z" + gzipSync(Buffer.from(JSON.stringify(cupG))).toString("base64")
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      await fetch(BASE + "api/g/CUPS", { method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ v: 1, blob: cblob }) });
+      const K = boot(BASE + "#g=CUPS", { "harbor-seat-CUPS": "0" });
+      await wait(K, (x) => H(x).includes("WINS"), 8000);
+      const res = (K.document.querySelector('[title="cup-result"]') || {}).textContent || "";
+      check("game 3 ends with the Harvest Cup going to the top gatherer, not the winner",
+        res.includes("HARVEST CUP") && res.includes(cupG.n[1] + " takes the trophy") && res.includes("9 gained"));
+      check("the end screen names the next cup",
+        /Next cup: game 6, the Road Cup/.test((K.document.querySelector('[title="next-cup"]') || {}).textContent || ""));
+      click(K, "Rematch");
+      const nextCode = await (async () => {
+        for (let i = 0; i < 80; i++) {
+          const c = (H(K).match(/HARBOR · ([A-Z0-9]{4})/) || [])[1];
+          if (c && c !== "CUPS" && !H(K).includes("WINS")) return c;
+          await sleep(100);
+        }
+        return null;
+      })();
+      const g4 = nextCode ? await decodeState(nextCode) : null;
+      check("the cup trophy carries into game 4, on the right seat",
+        !!g4 && g4.gn === 4 && g4.tp?.[1]?.[0] === 1 && g4.tp?.[0]?.every((x) => x === 0));
+      check("the cup is recorded in the history entry", !!g4 && /:0:1$/.test(g4.hi[g4.hi.length - 1]));
+      check("the trophy shows on the player's tile in game 4", !!nextCode && H(K).includes("🏆1"));
+      check("game 4 is not a cup game", !K.document.querySelector('[title="cup-chip"]'));
+      check("the ★ tally still counts the game winner, not the cup winner",
+        !!g4 && g4.ws.split(",").map(Number)[0] === Number(newS.ws.split(",")[0]) + 1);
+    }
   }
 }
 

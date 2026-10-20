@@ -380,7 +380,8 @@ function newGame(code, names) {
     winner: null,
     rematch: "",
     wins: names.map(() => 0), // series tally, carried across rematches
-    history: [], // one {w, o, t, c} per finished game: winner seat, draft order, win target, classic flag
+    trophies: names.map(() => CUPS.map(() => 0)), // cup trophies per seat, one count per cup
+    history: [], // one {w, o, t, c[, k, cw]} per finished game: winner seat, draft order, win target, classic flag, cup + its winners
     gameNo: 1,
     arena: { id: makeArenaId(), name: "" }, // carried across rematches; the id never changes
     log: [{ t: Date.now(), m: "Game created. Place your first town." }],
@@ -561,6 +562,7 @@ function lobbyRemoveSeat(g, i) {
   g.players.splice(i, 1); g.hands.splice(i, 1); g.devHands.splice(i, 1);
   g.knights.splice(i, 1); g.roadLen.splice(i, 1); g.stats.splice(i, 1); g.seriesStats.splice(i, 1);
   if (g.wins) g.wins.splice(i, 1);
+  if (g.trophies) g.trophies.splice(i, 1);
   g.players.forEach((p, j) => { if (!p.claimed) p.name = `Player ${j + 1}`; });
   reassignColors(g);
   resetLobbyOrder(g);
@@ -575,16 +577,78 @@ function lobbyAddSeat(g) {
   g.hands.push(emptyHand()); g.devHands.push([]); g.knights.push(0); g.roadLen.push(0);
   g.stats.push([0, 0, 0]); g.seriesStats.push([0, 0, 0]);
   if (g.wins) g.wins.push(0);
+  if (g.trophies) g.trophies.push(CUPS.map(() => 0));
   resetLobbyOrder(g);
   say(g, "A seat was added.");
   return g;
 }
+/* ---------- cups ----------
+   Every 3rd game of an arena is a cup game. It plays exactly like any other
+   (the winner still takes the ★), but a 🏆 also goes to whoever leads that
+   cup's stat when it ends. Five cups debut in order, the Crown Cup closes the
+   lap, then they rotate. The schedule is a pure function of gameNo, so
+   nothing about it travels — only the trophies won. Every stat is public. */
+const BASE_CUPS = [
+  { name: "Harvest Cup", icon: "🌾", what: "most resources gained", unit: "gained", stat: (g, i) => g.stats?.[i]?.[0] || 0 },
+  { name: "Road Cup", icon: "🛣️", what: "longest road at the end", unit: "long", stat: (g, i) => g.roadLen?.[i] || 0 },
+  { name: "Knight Cup", icon: "⚔️", what: "most knights played", unit: "knights", stat: (g, i) => g.knights?.[i] || 0 },
+  { name: "Pirate Cup", icon: "🏴‍☠️", what: "most robber steals", unit: "steals", stat: (g, i) => g.stats?.[i]?.[1] || 0 },
+  { name: "Skyline Cup", icon: "🏙️", what: "most cities on the board", unit: "cities", stat: (g, i) => countOwned(g, i, "city") },
+];
+/* the Crown: in each of the five, you score one point per player you beat
+   outright plus one, so a 4-seat table runs 4-3-2-1 with ties sharing high */
+const crownStat = (g, i) => BASE_CUPS.reduce((s, c) => {
+  const mine = c.stat(g, i);
+  return s + g.players.length - g.players.filter((_, j) => c.stat(g, j) > mine).length;
+}, 0);
+const CUPS = [...BASE_CUPS,
+  { name: "Crown Cup", icon: "👑", what: "best across all five cups", unit: "crown pts", stat: crownStat }];
+const CUP_EVERY = 3;
+const cupFor = (gameNo) => (gameNo % CUP_EVERY === 0 ? (gameNo / CUP_EVERY - 1) % CUPS.length : -1);
+const cupOf = (g) => cupFor(g.gameNo || 1);
+const nextCupGame = (gameNo) => (Math.floor(gameNo / CUP_EVERY) + 1) * CUP_EVERY;
+/* whoever leads the cup's stat right now (a tie is everyone tied); nobody
+   leads at zero — an unplayed Knight Cup stays in the cabinet */
+function cupLeaders(g) {
+  const k = cupOf(g);
+  if (k < 0) return { k, best: 0, seats: [] };
+  const vals = g.players.map((_, i) => CUPS[k].stat(g, i));
+  const best = Math.max(...vals);
+  return { k, best, seats: best > 0 ? vals.flatMap((v, i) => (v === best ? [i] : [])) : [] };
+}
+/* the trophy, once the game is won: ties go to the higher final score,
+   then to the game's winner; anything still level is shared */
+function cupWinners(g) {
+  const { seats } = cupLeaders(g);
+  if (g.winner == null || seats.length < 2) return g.winner == null ? [] : seats;
+  const top = Math.max(...seats.map((i) => scoreFor(g, i, true)));
+  const left = seats.filter((i) => scoreFor(g, i, true) === top);
+  return left.includes(g.winner) ? [g.winner] : left;
+}
+/* trophy counts including the game on screen, which isn't folded into
+   trophies[] until the next rematch is created (same as wins) */
+function trophiesNow(g) {
+  const k = cupOf(g), won = cupWinners(g);
+  return g.players.map((_, i) => CUPS.map((_, c) => (g.trophies?.[i]?.[c] || 0) + (c === k && won.includes(i) ? 1 : 0)));
+}
+/* one seat's trophy shelf as text: 🌾 🛣️×2 */
+const cabinet = (row) => CUPS.flatMap((c, k) => (row?.[k] ? [c.icon + (row[k] > 1 ? "×" + row[k] : "")] : [])).join(" ");
+const cupLine = (g) => {
+  const k = cupOf(g);
+  return k < 0 ? "" : `🏆 Game ${g.gameNo} is the ${CUPS[k].name} — ${CUPS[k].what} takes the trophy.`;
+};
+
 /* the record a finished game leaves behind; entries from before rules were
-   recorded have no t/c and are read as first-to-10 */
-const histEntry = (g) => ({
-  w: g.winner, o: g.setupOrder.slice(0, g.players.length).join(""),
-  t: g.rules?.win || 10, c: g.rules?.classic ? 1 : 0,
-});
+   recorded have no t/c and are read as first-to-10. Cup games add the cup
+   (k) and the seats that took its trophy (cw, may be empty or shared). */
+const histEntry = (g) => {
+  const k = cupOf(g);
+  return {
+    w: g.winner, o: g.setupOrder.slice(0, g.players.length).join(""),
+    t: g.rules?.win || 10, c: g.rules?.classic ? 1 : 0,
+    ...(k >= 0 ? { k, cw: cupWinners(g).join("") } : {}),
+  };
+};
 /* same crew, fresh island — everyone is already seated, so it starts at once */
 function makeRematch(prev, code) {
   const g = newGame(code, prev.players.map((p) => p.name));
@@ -596,6 +660,7 @@ function makeRematch(prev, code) {
     g.players[i].color = p.color; // chosen colours ride into the rematch
   });
   g.wins = prev.players.map((_, i) => (prev.wins?.[i] || 0) + (prev.winner === i ? 1 : 0));
+  g.trophies = trophiesNow(prev);
   g.history = [...(prev.history || []), histEntry(prev)].slice(-HISTORY_MAX);
   g.arena = { id: prev.arena?.id || g.arena.id, name: prev.arena?.name || "" };
   g.gameNo = (prev.gameNo || 1) + 1;
@@ -603,6 +668,7 @@ function makeRematch(prev, code) {
   g.seriesStats = prev.players.map((_, i) =>
     [0, 1, 2].map((k) => (prev.seriesStats?.[i]?.[k] || 0) + (prev.stats?.[i]?.[k] || 0)));
   g.log = [{ t: Date.now(), m: `Rematch — game ${g.gameNo} of the series.` }];
+  if (cupOf(g) >= 0) say(g, cupLine(g));
   startLobby(g, false);
   return g;
 }
@@ -632,6 +698,7 @@ function startLobby(g, dropOpen) {
         g.players.splice(i, 1); g.hands.splice(i, 1); g.devHands.splice(i, 1);
         g.knights.splice(i, 1); g.roadLen.splice(i, 1); g.stats.splice(i, 1); g.seriesStats.splice(i, 1);
         if (g.wins) g.wins.splice(i, 1);
+        if (g.trophies) g.trophies.splice(i, 1);
       }
     }
     reassignColors(g);
@@ -955,6 +1022,12 @@ function endTurn(g) {
     g.winner = p;
     g.phase = "over";
     say(g, `${pname(g, p)} reached ${winAt(g)} points and wins.`);
+    const k = cupOf(g), cw = cupWinners(g);
+    if (k >= 0) {
+      say(g, cw.length
+        ? `🏆 The ${CUPS[k].name} goes to ${cw.map((i) => pname(g, i)).join(" and ")} (${CUPS[k].stat(g, cw[0])} ${CUPS[k].unit}).`
+        : `🏆 Nobody scored in the ${CUPS[k].name} — it stays in the cabinet.`);
+    }
     g.chat = []; // what was said at sea, stays at sea
     return g;
   }
@@ -1050,7 +1123,10 @@ function pack(g) {
     w: g.winner == null ? -1 : g.winner,
     rm: g.rematch || "",
     ws: (g.wins || []).join(","),
-    hi: (g.history || []).map((h) => h.w + ":" + h.o + (h.t ? ":" + h.t + ":" + (h.c ? 1 : 0) : "")),
+    hi: (g.history || []).map((h) => h.w + ":" + h.o + (h.t ? ":" + h.t + ":" + (h.c ? 1 : 0) : "")
+      + (h.t && h.k != null ? ":" + h.k + ":" + (h.cw || "") : "")),
+    /* trophies only ride along once someone has one — undefined drops out of the JSON */
+    tp: (g.trophies || []).some((r) => r.some(Boolean)) ? g.trophies : undefined,
     ar: [g.arena?.id || "", g.arena?.name || ""],
     gn: g.gameNo || 1,
     av: Math.max(g.appV || 0, APP_V),
@@ -1130,9 +1206,11 @@ function unpack(o) {
     rematch: o.rm || "",
     wins: o.ws ? o.ws.split(",").map(Number) : o.n.map(() => 0),
     history: (o.hi || []).map((s) => {
-      const [w, ord, t, c] = s.split(":");
-      return t ? { w: +w, o: ord, t: +t, c: +c } : { w: +w, o: ord };
+      const [w, ord, t, c, k, cw] = s.split(":");
+      if (!t) return { w: +w, o: ord };
+      return k !== undefined ? { w: +w, o: ord, t: +t, c: +c, k: +k, cw } : { w: +w, o: ord, t: +t, c: +c };
     }),
+    trophies: o.n.map((_, i) => CUPS.map((_, k) => (o.tp && o.tp[i] && o.tp[i][k]) || 0)),
     /* blobs from before arenas have no ar — the id is minted at the next rematch or rename */
     arena: { id: (o.ar && o.ar[0]) || "", name: (o.ar && o.ar[1]) || "" },
     gameNo: o.gn || 1,
@@ -1228,7 +1306,8 @@ async function serverPut(g, by) {
     winner: g.winner == null ? null : g.winner,
     tradeTo: g.trade ? g.trade.to : null,
     rematch: g.rematch || null,
-    arena: g.arena?.name || null,
+    /* the server heads pings with this; cup games add the cup's name */
+    arena: [g.arena?.name, cupOf(g) >= 0 ? CUPS[cupOf(g)].name : ""].filter(Boolean).join(" · ") || null,
     ...chatMeta(g),
   };
   try {
@@ -2724,6 +2803,20 @@ export default function App() {
             {g.arena.name}<span style={{ color: C.parchDim }}> · game {g.gameNo || 1}</span>
           </div>
         )}
+        {cupOf(g) >= 0 && (() => {
+          const { k, best, seats } = cupLeaders(g);
+          const who = g.winner != null ? cupWinners(g) : seats;
+          return (
+            <div title="cup-chip" onClick={() => setModal({ k: "log" })} style={{ marginTop: 6, fontFamily: dispFont, fontSize: 12,
+              letterSpacing: ".1em", textTransform: "uppercase", color: C.gold, cursor: "pointer",
+              border: `1px solid ${C.gold}`, borderRadius: 4, padding: "3px 8px", background: "rgba(224,164,55,.08)",
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {CUPS[k].icon} {CUPS[k].name}
+              <span style={{ color: C.parchDim }}> · {!who.length ? `${CUPS[k].what}`
+                : `${who.map((i) => pname(g, i)).join(" & ")} ${g.winner != null ? "takes it" : who.length > 1 ? "tied" : "leads"} (${best} ${CUPS[k].unit})`}</span>
+            </div>
+          );
+        })()}
         <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
           {g.players.map((p, i) => (
             <div key={i} title={i === actor ? "Your record" : `What ${p.name} has played`}
@@ -2740,6 +2833,7 @@ export default function App() {
                 {handTotal(g.hands[i])}c · {g.devHands[i].filter((c) => !c.used).length}d
                 {g.longestRoad === i ? " · LR" : ""}{g.largestArmy === i ? " · LA" : ""}
                 {g.wins?.[i] ? ` · ★${g.wins[i]}` : ""}
+                {(() => { const t = (g.trophies?.[i] || []).reduce((a, b) => a + b, 0); return t ? ` · 🏆${t}` : ""; })()}
               </div>
             </div>
           ))}
@@ -2956,16 +3050,43 @@ export default function App() {
             <div style={{ marginTop: 4, color: C.parchDim, fontSize: 13 }}>
               …after drafting {ORDINAL[draftPos({ o: g.setupOrder.slice(0, g.players.length).join("") }, g.winner)]} this game.
             </div>
+            {cupOf(g) >= 0 && (() => {
+              const k = cupOf(g), cw = cupWinners(g);
+              return (
+                <div title="cup-result" style={{ marginTop: 10, border: `1px solid ${C.gold}`, borderRadius: 5, padding: "8px 10px" }}>
+                  <div style={{ fontFamily: dispFont, fontSize: 16, letterSpacing: ".08em", color: C.gold }}>
+                    🏆 {CUPS[k].icon} {CUPS[k].name.toUpperCase()}</div>
+                  <div style={{ fontSize: 13, color: C.parch, marginTop: 2 }}>
+                    {cw.length ? `${cw.map((i) => pname(g, i)).join(" and ")} take${cw.length > 1 ? "" : "s"} the trophy — ${CUPS[k].stat(g, cw[0])} ${CUPS[k].unit}.`
+                      : "Nobody scored — the trophy stays in the cabinet."}
+                  </div>
+                </div>
+              );
+            })()}
             <div style={{ marginTop: 10, borderTop: `1px solid ${C.line}`, paddingTop: 10 }}>
               <Eyebrow>Series — {g.gameNo} game{g.gameNo === 1 ? "" : "s"} in</Eyebrow>
-              {standings(g).map((s, rank) => (
-                <div key={s.i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
-                  <span style={{ width: 16, fontFamily: dispFont, fontSize: 12, color: C.parchDim }}>{rank + 1}</span>
-                  <span style={{ width: 9, height: 9, borderRadius: 2, background: swatchBg(g.players[s.i].color) }} />
-                  <span style={{ flex: 1, fontSize: 14, color: rank === 0 ? C.gold : C.parch }}>{s.name}</span>
-                  <span style={{ fontFamily: dispFont, fontSize: 15, color: rank === 0 ? C.gold : C.parch }}>{s.w}</span>
-                </div>
-              ))}
+              {(() => {
+                const tro = trophiesNow(g);
+                return standings(g).map((s, rank) => (
+                  <div key={s.i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>
+                    <span style={{ width: 16, fontFamily: dispFont, fontSize: 12, color: C.parchDim }}>{rank + 1}</span>
+                    <span style={{ width: 9, height: 9, borderRadius: 2, background: swatchBg(g.players[s.i].color) }} />
+                    <span style={{ flex: 1, fontSize: 14, color: rank === 0 ? C.gold : C.parch }}>{s.name}</span>
+                    {cabinet(tro[s.i]) && <span title="trophy-shelf" style={{ fontSize: 13 }}>{cabinet(tro[s.i])}</span>}
+                    <span style={{ fontFamily: dispFont, fontSize: 15, color: rank === 0 ? C.gold : C.parch }}>{s.w}</span>
+                  </div>
+                ));
+              })()}
+              {(() => {
+                const n = nextCupGame(g.gameNo || 1), k = cupFor(n);
+                return (
+                  <div title="next-cup" style={{ marginTop: 6, fontSize: 12, color: n === (g.gameNo || 1) + 1 ? C.gold : C.parchDim }}>
+                    {n === (g.gameNo || 1) + 1
+                      ? `🏆 Next island is the ${CUPS[k].name} — ${CUPS[k].what} takes the trophy.`
+                      : `Next cup: game ${n}, the ${CUPS[k].name} ${CUPS[k].icon}`}
+                  </div>
+                );
+              })()}
             </div>
             {(actor != null || g.rematch) && (
               <Btn tone="go" style={{ width: "100%", marginTop: 12, padding: "13px", fontSize: 15 }}
@@ -3168,6 +3289,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
     const hist = seriesHistory(g);
     const lengths = [...new Set(hist.map((e) => e.t || 10))].sort((a, b) => a - b);
     const partial = hist.length < (g.wins || []).reduce((x, y) => x + y, 0) + (g.winner != null ? 1 : 0);
+    const tro = trophiesNow(g);
     return (
       <Sheet title="Recent moves" onClose={close}>
         <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
@@ -3207,6 +3329,9 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
                   <div style={{ marginLeft: 33, fontSize: 11, color: C.parchDim }}>
                     gained {tot(0)} · stolen {tot(1)} · sevens {tot(2)}
                   </div>
+                  {cabinet(tro[s.i]) && (
+                    <div title="trophy-cabinet" style={{ marginLeft: 33, fontSize: 12, color: C.gold }}>🏆 {cabinet(tro[s.i])}</div>
+                  )}
                   {lengths.length > 1 && (
                     <div style={{ marginLeft: 33, fontSize: 11, color: C.parchDim }}>
                       {partial ? `last ${hist.length} games: ` : "wins: "}{lengths.map((t) => `${hist.filter((e) => e.w === s.i && (e.t || 10) === t).length} to ${t}`).join(" · ")}
@@ -3215,6 +3340,15 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
                 </div>
               );
             })}
+            {(() => {
+              const cur = cupOf(g) >= 0 && g.winner == null, n = cur ? g.gameNo : nextCupGame(g.gameNo || 1);
+              const c = CUPS[cupFor(n)];
+              return (
+                <div style={{ marginTop: 6, fontSize: 11, color: C.parchDim }}>
+                  Every {CUP_EVERY}rd game is a cup. {cur ? "This one" : `Next: game ${n}`} — {c.icon} {c.name}, {c.what}.
+                </div>
+              );
+            })()}
             {(() => {
               const hist = seriesHistory(g);
               if (!hist.length) return null;
