@@ -30,6 +30,10 @@ const PC = [
   { name: "Violet", hex: "#8e6bb5" },
   { name: "Teal", hex: "#3aa8a0" },
   { name: "Rose", hex: "#c96b8e" },
+  /* appended only — a seat's colour travels as its index */
+  { name: "Brown", hex: "#7b4a26" },
+  { name: "Pink", hex: "#e45aa8" },
+  { name: "Sky", hex: "#7cc4ea" },
 ];
 /* the multicolour set: every piece a different colour, chosen by piece id */
 const MULTI = 99;
@@ -3736,6 +3740,28 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
         {(g.wins?.[who] || 0) > 0 && rowLine("Series wins", g.wins[who])}
         {mine && g.devHands[who].filter((c) => !c.used).length > 0 &&
           rowLine("Still in your hand", g.devHands[who].filter((c) => !c.used).map((c) => DEV_LABEL[c.type]).join(", "))}
+        {(() => {
+          const row = trophiesNow(g)[who];
+          const total = row.reduce((a, b) => a + b, 0);
+          return (
+            <div title="trophy-cabinet-full" style={{ marginTop: 14 }}>
+              <Eyebrow>{mine ? "Your" : `${p.name}'s`} trophy cabinet — {total} 🏆</Eyebrow>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+                {CUPS.map((c, k) => (
+                  <div key={k} style={{ border: `1px solid ${row[k] ? C.gold : C.line}`, borderRadius: 5, padding: "6px 4px",
+                    textAlign: "center", background: row[k] ? "rgba(224,164,55,.1)" : "transparent", opacity: row[k] ? 1 : 0.4 }}>
+                    <div style={{ fontSize: 20, filter: row[k] ? "none" : "grayscale(1)" }}>{c.icon}</div>
+                    <div style={{ fontSize: 11, color: row[k] ? C.gold : C.parchDim }}>{c.name}</div>
+                    <div style={{ fontFamily: dispFont, fontSize: 14, color: row[k] ? C.gold : C.parchDim }}>×{row[k]}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ marginTop: 6, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>
+                Every {CUP_EVERY}rd game of the arena is a cup. Next: game {cupOf(g) >= 0 && g.winner == null ? g.gameNo : nextCupGame(g.gameNo || 1)}.
+              </div>
+            </div>
+          );
+        })()}
         {mine && (
           <div style={{ marginTop: 14 }}>
             <Eyebrow>Your house colour</Eyebrow>

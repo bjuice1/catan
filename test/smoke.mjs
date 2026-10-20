@@ -1044,6 +1044,24 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
       check("the cup is recorded in the history entry", !!g4 && /:0:1$/.test(g4.hi[g4.hi.length - 1]));
       check("the trophy shows on the player's tile in game 4", !!nextCode && H(K).includes("🏆1"));
       check("game 4 is not a cup game", !K.document.querySelector('[title="cup-chip"]'));
+
+      // tapping a tile opens that player's record, cabinet included: seat 0
+      // has none yet, seat 1 holds the Harvest Cup
+      const tileOf = (i) => K.document.querySelectorAll('[title="Your record"], [title^="What "]')[i];
+      tap(K, tileOf(1));
+      await wait(K, (x) => !!x.document.querySelector('[title="trophy-cabinet-full"]'), 3000);
+      const cab1 = (K.document.querySelector('[title="trophy-cabinet-full"]') || {}).textContent || "";
+      check("another player's record shows their trophy cabinet", /trophy cabinet — 1 🏆/.test(cab1) && cab1.includes("×1"));
+      click(K, "×"); await sleep(150);
+      tap(K, K.document.querySelector('[title="Your record"]'));
+      await wait(K, (x) => !!x.document.querySelector('[title="colour-8"]'), 3000);
+      check("your own record shows an empty cabinet",
+        /Your trophy cabinet — 0 🏆/.test((K.document.querySelector('[title="trophy-cabinet-full"]') || {}).textContent || ""));
+
+      // brown (and the other late colours) can be picked like any other
+      tap(K, K.document.querySelector('[title="colour-8"]'));
+      check("a house can be painted brown", !!nextCode && await waitState(nextCode, (o) => o.co[0] === 8, 4000));
+      click(K, "×");
       check("the ★ tally still counts the game winner, not the cup winner",
         !!g4 && g4.ws.split(",").map(Number)[0] === Number(newS.ws.split(",")[0]) + 1);
     }
