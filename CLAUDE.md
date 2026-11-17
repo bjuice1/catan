@@ -109,7 +109,12 @@ test/smoke.mjs    Real server + four jsdom phones. See below.
   hold at once: Harbormaster (towns on two different harbours) and Desert
   Master (two towns around the desert). Both are read off the board in
   `scoreFor`, so nothing extra travels. `setRules` refuses to switch it on
-  mid-game when the bonus would put someone at the target.
+  mid-game when the bonus would put someone at the target. The same rule
+  unlocks "sacrificing to the Catan Lords": `buyPoint` trades 2 of every
+  resource for a point, as often as the player can pay on their turn
+  (`vpBought`/`vb`). Sacrificed points keep counting if the rule is later
+  switched off. The win target is any whole number from 8 to 21, set with
+  one stepper (`WinStepper`) on the create screen and in Change rules.
 
 - **A phone's seat follows its token, not the rematch button.** `makeRematch`
   copies every seat's `tok` forward, and `seatByTok` looks through every

@@ -58,6 +58,7 @@ const COST = {
   city: { grain: 2, ore: 3 },
   dev: { wool: 1, grain: 1, ore: 1 },
   ship: { lumber: 1, wool: 1 },
+  point: { brick: 2, lumber: 2, wool: 2, grain: 2, ore: 2 }, // a sacrifice to the Catan Lords
 };
 const LIMIT = { road: 15, settlement: 5, city: 4, ship: 15 };
 const SIZE = 10;
@@ -407,6 +408,7 @@ function scoreFor(g, i, includeHidden) {
   if (g.largestArmy === i) s += 2;
   s += 2 * islandsSettled(g, i);
   if (g.rules?.masters) s += (harbormaster(g, i) ? 2 : 0) + (desertMaster(g, i) ? 2 : 0);
+  s += pointsBought(g, i); // paid for, so they stay even if the rule is switched off later
   if (includeHidden) s += (g.devHands[i] || []).filter((c) => c.type === "vp").length;
   return s;
 }
@@ -419,6 +421,21 @@ const harboursHeld = (g, p) => g.board.ports.filter((pt) => pt.verts.some((v) =>
 const desertTowns = (g, p) => new Set(g.board.hexes.filter((h) => h.terrain === "desert").flatMap((h) => h.verts).filter((v) => ownsAt(g, p, v))).size;
 const harbormaster = (g, p) => harboursHeld(g, p) >= 2;
 const desertMaster = (g, p) => desertTowns(g, p) >= 2;
+/* Sacrificing to the Catan Lords, the third master: 2 of every resource
+   buys a point, as many times as you can pay for on your turn. It is the
+   only point source that does not need land, which is what makes a long
+   target reachable. */
+const pointsBought = (g, p) => (g.vpBought && g.vpBought[p]) || 0;
+const canBuyPoint = (g, p) => !!g.rules?.masters && g.phase === "main" && g.turn === p
+  && canAfford(g.hands[p], COST.point);
+function buyPoint(g, p) {
+  if (!canBuyPoint(g, p)) return false;
+  pay(g.hands[p], COST.point);
+  RES.forEach((r) => { g.bank[r] += COST.point[r]; });
+  g.vpBought = g.players.map((_, i) => pointsBought(g, i) + (i === p ? 1 : 0));
+  say(g, `🔥 ${pname(g, p)} sacrificed 2 of everything to the Catan Lords — 1 point.`);
+  return g;
+}
 /* say so the moment a new town earns one */
 function withMasters(g, p, place) {
   const was = [harbormaster(g, p), desertMaster(g, p)];
@@ -511,6 +528,7 @@ function newGame(code, names, mapId) {
     robberReturn: "main",
     freeRoads: 0,
     devPlayed: false,
+    vpBought: names.map(() => 0), // points bought by sacrificing to the Catan Lords
     trade: null,
     winner: null,
     rematch: "",
@@ -531,7 +549,7 @@ const winAt = (g) => (typeof window !== "undefined" && window.HARBOR_WIN_AT) || 
    kind of game. A target someone already shows on the board is refused, so
    flipping a setting can never end the game on the spot (hidden point cards
    deliberately don't count: refusing on them would leak them). */
-const WIN_TARGETS = [8, 10, 12, 14, 15];
+const WIN_MIN = 8, WIN_MAX = 21; // any whole number between is a legal target
 /* the thing you send after a slow player. Each phone picks its own; the
    pick rides with the poke (g.duckKind / g.duckWord) so every island shows
    the sender's creature and hears its cry. */
@@ -624,13 +642,13 @@ const bubbleOf = (g) => (g?.duckWord || mascotOf(g).bubble).toUpperCase();
 const minWinTarget = (g) => Math.max(...g.players.map((_, i) => scoreFor(g, i, false))) + 1;
 const mapLine = (g) => (mapOf(g) === MAPS.classic ? "" : ` · ${mapOf(g).name}`);
 const rulesLine = (r) => `First to ${r?.win || 10}${r?.friendly ? " · friendly robber" : ""}${r?.classic ? " · road-splitting towns" : ""}${r?.masters ? " · masters" : ""}`;
-const MASTERS_HINT = "+2 for towns on two harbours, +2 for two towns around the desert";
+const MASTERS_HINT = "+2 for towns on two harbours, +2 for two towns around the desert, and sacrifice 2 of every resource to the Catan Lords for a point";
 /* switching the masters on mid-game must not hand anyone the win on the spot */
 const mastersWouldWin = (g, win) => g.players.some((_, i) => scoreFor({ ...g, rules: { ...g.rules, masters: true } }, i, false) >= win);
 function setRules(g, by, next) {
   if (g.winner != null) return false;
   const cur = { win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic, masters: !!g.rules?.masters };
-  const win = WIN_TARGETS.includes(next.win) ? next.win : cur.win;
+  const win = Number.isInteger(next.win) && next.win >= WIN_MIN && next.win <= WIN_MAX ? next.win : cur.win;
   if (win !== cur.win && win < minWinTarget(g)) return false;
   const out = { win, friendly: !!next.friendly, classic: !!next.classic, masters: !!next.masters };
   if (out.masters && !cur.masters && mastersWouldWin(g, out.win)) return false;
@@ -1330,6 +1348,8 @@ function pack(g) {
     rr: PH_LIST.indexOf(g.robberReturn),
     fr: g.freeRoads,
     dp: g.devPlayed ? 1 : 0,
+    /* bought points only ride along once someone has one */
+    vb: (g.vpBought || []).some(Boolean) ? g.vpBought : undefined,
     w: g.winner == null ? -1 : g.winner,
     rm: g.rematch || "",
     ws: (g.wins || []).join(","),
@@ -1409,6 +1429,7 @@ function unpack(o) {
     robberReturn: PH_LIST[o.rr],
     freeRoads: o.fr,
     devPlayed: !!o.dp,
+    vpBought: o.n.map((_, i) => (o.vb && o.vb[i]) || 0),
     trade: o.tr ? {
       from: o.tr[0], to: o.tr[1],
       give: Object.fromEntries(RES.map((r, i) => [r, o.tr[2 + i]])),
@@ -1857,6 +1878,7 @@ function PieceIcon({ kind, color, size = 26 }) {
       {kind === "ship" && <g><path d="M2.5,12 L17.5,12 L14.5,17 L5.5,17 Z" fill={fill} stroke={edge} strokeWidth="0.8" /><path d="M9.5,10.5 L9.5,2.5 L16,10.5 Z" fill="#f2ead6" stroke={edge} strokeWidth="0.7" /></g>}
       {kind === "town" && <polygon points="4,17 4,9 10,3.5 16,9 16,17" fill={fill} stroke={edge} strokeWidth="0.8" />}
       {kind === "city" && <g><rect x="2.5" y="10" width="15" height="7.5" fill={fill} stroke={edge} strokeWidth="0.8" /><polygon points="2.5,10 7.5,4 12.5,10" fill={fill} stroke={edge} strokeWidth="0.8" /></g>}
+      {kind === "point" && <polygon points="10,2 12.4,7.4 18.2,7.9 13.8,11.7 15.2,17.4 10,14.3 4.8,17.4 6.2,11.7 1.8,7.9 7.6,7.4" fill={fill} stroke={edge} strokeWidth="0.8" />}
       {kind === "dev" && <g><rect x="5" y="2.5" width="10" height="15" rx="1.5" fill={fill} stroke={edge} strokeWidth="0.8" /><text x="10" y="13.6" textAnchor="middle" fontSize="9" fontFamily={dispFont} fontWeight="600" fill="rgba(6,20,25,.8)">?</text></g>}
     </svg>
   );
@@ -1874,6 +1896,22 @@ function MapPick({ value, onChange }) {
         ))}
       </div>
       <div style={{ marginTop: 6, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>{(MAPS[value] || MAPS.classic).blurb}</div>
+    </div>
+  );
+}
+/* the win target: one row, down and up, any whole number in range */
+function WinStepper({ value, min, onChange }) {
+  const side = (title, label, to, ok) => (
+    <button title={title} disabled={!ok} onClick={() => onChange(to)} style={{ width: 52,
+      background: "rgba(255,255,255,.04)", border: `1px solid ${C.line}`, color: C.parch, opacity: ok ? 1 : 0.3,
+      borderRadius: 5, padding: "9px 0", fontFamily: dispFont, fontSize: 18, cursor: ok ? "pointer" : "default" }}>{label}</button>
+  );
+  return (
+    <div style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "stretch" }}>
+      {side("win-down", "−", value - 1, value - 1 >= min)}
+      <div title="win-target" style={{ flex: 1, textAlign: "center", background: "rgba(224,164,55,.16)", border: `1px solid ${C.gold}`,
+        color: C.gold, borderRadius: 5, padding: "9px", fontFamily: dispFont, fontSize: 15 }}>First to {value}</div>
+      {side("win-up", "+", value + 1, value + 1 <= WIN_MAX)}
     </div>
   );
 }
@@ -2817,14 +2855,8 @@ export default function App() {
               ))}
             </div>
             <Eyebrow>House rules</Eyebrow>
-            <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-              {(myMap === "classic" ? [8, 10, 12] : [12, 14, 15]).map((n) => (
-                <button key={n} onClick={() => setMyWin(n)} style={{ flex: 1,
-                  background: myWin === n ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
-                  border: `1px solid ${myWin === n ? C.gold : C.line}`, color: myWin === n ? C.gold : C.parchDim,
-                  borderRadius: 5, padding: "9px", fontFamily: dispFont, fontSize: 13, cursor: "pointer" }}>First to {n}</button>
-              ))}
-            </div>
+            <WinStepper value={myWin} min={WIN_MIN}
+              onChange={(n) => { setMyWin(n); if (n === WIN_MAX) setMyMasters(true); /* 21 is out of reach without them */ }} />
             <button onClick={() => setMyFriendly(!myFriendly)} style={{ width: "100%", textAlign: "left",
               background: myFriendly ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
               border: `1px solid ${myFriendly ? C.gold : C.line}`, color: myFriendly ? C.gold : C.parchDim,
@@ -3027,6 +3059,7 @@ export default function App() {
     if (k === "town") return canBuy("settlement") && countOwned(g, actor, "settlement") < LIMIT.settlement && legalSettlements(g, actor, false).length > 0;
     if (k === "city") return canBuy("city") && countOwned(g, actor, "city") < LIMIT.city && legalCities(g, actor).length > 0;
     if (k === "dev") return canBuy("dev") && g.devDeck.length > 0;
+    if (k === "point") return canBuyPoint(g, actor);
     return false;
   };
   const startBuild = (kind) => {
@@ -3392,6 +3425,7 @@ export default function App() {
                 ["town", "Town", canDo("town"), () => startBuild("town")],
                 ["city", "City", canDo("city"), () => startBuild("city")],
                 ["dev", "Dev card", canDo("dev"), () => apply((d) => buyDev(d, actor))],
+                ...(g.rules?.masters ? [["point", "Sacrifice", canDo("point"), () => setModal({ k: "point" })]] : []),
               ].map(([k, label, ok, go]) => {
                 const active = sel?.kind === k;
                 return (
@@ -3583,6 +3617,10 @@ export default function App() {
                   active={sel?.kind === "city"} onClick={() => startBuild("city")} />
                 <BuildRow label="Development card" cost="1 wool · 1 grain · 1 ore" note={`${g.devDeck.length} left`}
                   disabled={!canDo("dev")} onClick={() => apply((d) => buyDev(d, actor))} />
+                {g.rules?.masters && (
+                  <BuildRow label="Sacrifice to the Catan Lords" cost="2 of every resource · 1 point" note={`${pointsBought(g, actor)} made`}
+                    disabled={!canDo("point")} onClick={() => setModal({ k: "point" })} />
+                )}
                 {sel && <div style={{ color: C.gold, fontSize: 13 }}>Tap a highlighted spot on the board.</div>}
               </div>
             )}
@@ -3878,17 +3916,9 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
         footer={<Btn tone="go" disabled={!changed} style={{ flex: 1 }}
           onClick={() => { apply((d) => setRules(d, actor, draftRules), true); close(); }}>Save rules</Btn>}>
         <Eyebrow>Points to win</Eyebrow>
-        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-          {WIN_TARGETS.map((n) => {
-            const on = draftRules.win === n, blocked = n !== cur.win && n < floor;
-            return (
-              <button key={n} disabled={blocked} onClick={() => setDraftRules((r) => ({ ...r, win: n }))} style={{ flex: 1,
-                background: on ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
-                border: `1px solid ${on ? C.gold : C.line}`, color: on ? C.gold : C.parchDim, opacity: blocked ? 0.35 : 1,
-                borderRadius: 5, padding: "9px 4px", fontFamily: dispFont, fontSize: 13, cursor: blocked ? "default" : "pointer" }}>First to {n}</button>
-            );
-          })}
-        </div>
+        {/* never below what someone already shows on the board — except back to where it is now */}
+        <WinStepper value={draftRules.win} min={Math.min(Math.max(WIN_MIN, floor), cur.win)}
+          onChange={(n) => setDraftRules((r) => ({ ...r, win: n }))} />
         {toggle("classic", "Road-splitting towns", "classic Catan: a town may land mid-road and cut a longest road")}
         {toggle("friendly", "Friendly robber", "no robbing anyone below 3 points")}
         {mastersBlocked
@@ -4141,6 +4171,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
         </div>
         {rowLine("Dev cards played", playedSummary(g, who) || "none yet")}
         {rowLine("Knights on the table", g.knights[who])}
+        {(g.rules?.masters || pointsBought(g, who) > 0) && rowLine("Sacrifices to the Catan Lords", `${pointsBought(g, who)} · +${pointsBought(g, who)} point${pointsBought(g, who) === 1 ? "" : "s"}`)}
         {g.rules?.masters && rowLine("Harbormaster", `${harboursHeld(g, who)} of 2 harbours${harbormaster(g, who) ? " · +2 points" : ""}`)}
         {g.rules?.masters && rowLine("Desert Master", `${desertTowns(g, who)} of 2 desert towns${desertMaster(g, who) ? " · +2 points" : ""}`)}
         {mapOf(g).ships && rowLine("Ships at sea", `${countOwned(g, who, "ship")} of ${LIMIT.ship}`)}
@@ -4217,6 +4248,21 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
           onClick={() => { apply((d) => doDiscard(d, actor, pick)); close(); }}>
           {total === owed ? `Discard ${owed}` : `${total} of ${owed} chosen`}</Btn>}>
         <ResStepper value={pick} max={hand} onChange={(r, v) => setPick({ ...pick, [r]: Math.min(v, hand[r]) })} />
+      </Sheet>
+    );
+  }
+
+  if (modal.k === "point") {
+    /* ten cards is a lot to lose to a stray thumb — this one asks first */
+    const ok = canBuyPoint(g, actor);
+    return (
+      <Sheet title="Sacrifice to the Catan Lords" onClose={close}
+        footer={<Btn tone="go" disabled={!ok} style={{ flex: 1 }}
+          onClick={() => { apply((d) => buyPoint(d, actor)); close(); }}>Make the sacrifice</Btn>}>
+        <div style={{ fontSize: 14, lineHeight: 1.55 }}>
+          Give up <b>2 of every resource</b> and the Catan Lords grant <b>1 point</b>. As many times as you can pay for; it shows on your score straight away.
+        </div>
+        <div style={{ marginTop: 8, color: C.parchDim, fontSize: 13 }}>Sacrifices so far: {pointsBought(g, actor)}.</div>
       </Sheet>
     );
   }

@@ -98,6 +98,10 @@ const H = (w) => w.document.getElementById("root").innerHTML;
 const btn = (w, t) => [...w.document.querySelectorAll("button")]
   .find((x) => x.textContent.trim().toLowerCase().includes(t.toLowerCase()));
 const click = (w, t) => { const b = btn(w, t); if (!b) return false; b.dispatchEvent(new w.MouseEvent("click", { bubbles: true })); return true; };
+// the win target is one stepper: nudge it down or up n times
+const nudgeWin = async (w, dir, n) => {
+  for (let i = 0; i < n; i++) { w.document.querySelector(`[title="win-${dir}"]`).dispatchEvent(new w.MouseEvent("click", { bubbles: true })); await sleep(40); }
+};
 const tap = (w, el) => el.dispatchEvent(new w.MouseEvent("click", { bubbles: true }));
 const spots = (w) => [...w.document.querySelectorAll("circle")].filter((c) => c.getAttribute("r") === "5.2");
 const roadPicks = (w) => [...w.document.querySelectorAll("line")].filter((l) => l.getAttribute("stroke") === "transparent");
@@ -710,7 +714,7 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   await sleep(80);
   click(E, "2");
   await sleep(80);
-  click(E, "First to 8");
+  await nudgeWin(E, "down", 2); // 10 → 8
   await sleep(80);
   click(E, "Friendly robber");
   await sleep(80);
@@ -1010,7 +1014,7 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     await wait(otherW, (x) => !!btn(x, "Change rules"));
     click(otherW, "Change rules");
     await wait(otherW, (x) => !!btn(x, "Save rules"));
-    click(otherW, "First to 12");
+    await nudgeWin(otherW, "up", 2); // 10 → 12
     click(otherW, "Road-splitting towns");
     await sleep(80);
     click(otherW, "Save rules");
@@ -1039,9 +1043,16 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
       await wait(R, (x) => !!btn(x, "Change rules"));
       click(R, "Change rules");
       await wait(R, (x) => !!btn(x, "Save rules"));
-      const dis = (t) => { const b = btn(R, t); return !!b && b.disabled; };
-      check("a target someone already shows on the board can't be picked",
-        dis("First to 8") && dis("First to 10") && !dis("First to 15"));
+      const q = (t) => R.document.querySelector(`[title="${t}"]`);
+      await nudgeWin(R, "down", 6); // as low as it will go
+      const lowest = +q("win-target").textContent.replace(/\D/g, "");
+      check("the target can't be lowered to one someone already shows on the board",
+        lowest > 10 && lowest <= 12 && q("win-down").disabled && !q("win-up").disabled);
+      await nudgeWin(R, "up", 12); // up to 21, from inside the game
+      check("the target can be raised to 21 mid-game, and no further",
+        q("win-target").textContent === "First to 21" && q("win-up").disabled);
+      click(R, "Save rules");
+      check("a 21-point target saves", await waitState("RULZ", (o) => o.ru[0] === 21, 4000));
     }
 
     // a blob from before arenas existed: no ar, two-part history entries.
@@ -1245,6 +1256,38 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
     check("Harbormaster and Desert Master are worth 2 points each when the rule is on",
       on.pts === towns + 4 && /Harbormaster[2-9] of 2 harbours · \+2 points/.test(on.text) && /Desert Master\d of 2 desert towns · \+2 points/.test(on.text));
     if (on.pts !== towns + 4) console.log("  masters debug:", on.pts, towns, on.text.slice(0, 400));
+    // Master of Resources: 2 of everything buys a point, once a turn
+    {
+      await put("MSBY", { ...s0, c: "MSBY", q: 1, ph: 3, tu: 0, tn: 5, b, ru: [21, 0, 0, 1], h: [[4, 4, 4, 4, 4], [0, 0, 0, 0, 0]] });
+      const W = boot(BASE + "#g=MSBY", { "harbor-tok-MSBY": tok0 }, DBG);
+      await wait(W, (x) => !!x.document.querySelector('[title="quick-build"]'), 8000);
+      const strip = () => [...W.document.querySelector('[title="quick-build"]').querySelectorAll("button")];
+      check("the masters rule adds a point to the build strip", strip().length === 6 && !strip()[5].disabled);
+      tap(W, strip()[5]);
+      await wait(W, (x) => !!btn(x, "Make the sacrifice"), 3000);
+      click(W, "Make the sacrifice");
+      check("2 of every resource buys a point",
+        await waitState("MSBY", (o) => o.vb && o.vb[0] === 1 && o.h[0].join() === "2,2,2,2,2" && o.bk.every((n, k) => n === s0.bk[k] + 2), 4000));
+      await sleep(200);
+      tap(W, strip()[5]);
+      await wait(W, (x) => !!btn(x, "Make the sacrifice"), 3000);
+      click(W, "Make the sacrifice");
+      check("a second sacrifice in the same turn is allowed while the cards last",
+        await waitState("MSBY", (o) => o.vb[0] === 2 && o.h[0].join() === "0,0,0,0,0", 4000));
+      await sleep(200);
+      check("no cards, no sacrifice", strip()[5].disabled);
+      tap(W, W.document.querySelector('[title="Your record"]'));
+      await wait(W, (x) => /\d+ points? \(/.test(x.document.body.textContent), 3000);
+      check("a bought point shows on the score",
+        +(W.document.body.textContent.match(/(\d+) points? \(/) || [])[1] === towns + 6 && W.document.body.textContent.includes("Sacrifices to the Catan Lords2 · +2 points"));
+      const Fresh = boot(BASE);
+      await wait(Fresh, (x) => !!x.document.querySelector('input[placeholder="Your name"]'));
+      await nudgeWin(Fresh, "up", 11); // 10 → 21
+      check("first to 21 can be dialled on the create screen, and switches the masters on",
+        Fresh.document.querySelector('[title="win-target"]').textContent === "First to 21"
+        && Fresh.document.querySelector('[title="rule-masters"]').textContent.includes("— on")
+        && (await decodeState("MSBY")).ru[0] === 21);
+    }
     check("the masters rule survives the round trip", (await decodeState("MSON")).ru[3] === 1 && (await decodeState("MSOF")).ru.length === 3);
   }
 
