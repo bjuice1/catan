@@ -22,7 +22,7 @@ still decode and get imported into the server on open.
 ## Layout
 
 ```
-src/harbor.jsx    Everything: geometry, rules, codec, sync, UI. ~1800 lines.
+src/harbor.jsx    Everything: geometry, rules, codec, sync, UI. ~4400 lines.
 src/main.jsx      Mounts App into #root.
 build.mjs         esbuild → inlines React + app into a single index.html.
 index.html        Build output. COMMITTED — Railway serves it directly.
@@ -34,9 +34,10 @@ test/smoke.mjs    Real server + four jsdom phones. See below.
 
 `src/harbor.jsx` is organised in four bands, in order:
 
-1. **Geometry** — `baseGeometry()` builds the 19 hexes, 54 vertices, 72 edges
-   and 30 coastal edges once at module load, from fixed math. `GEO` is a
-   module-level constant and is never serialised.
+1. **Geometry** — `buildGeometry()` builds each map in `MAPS` once at module
+   load, from fixed math: classic is 19 hexes, 54 vertices, 72 edges; New
+   Shores is 37 / 96 / 132. Geometry is never serialised; a game names its
+   map (`g.map`) and every lookup goes through `geoOf(g)`.
 2. **Rules** — placement legality, production, robber, dev cards, longest road,
    scoring. All pure functions taking `(g, ...)` and mutating a draft.
 3. **Codec** — `pack`/`unpack` and `encodeGame`/`decodeGame`.
@@ -84,6 +85,39 @@ test/smoke.mjs    Real server + four jsdom phones. See below.
   change can never itself end a game. History entries record the target and
   road-splitting flag in force when the game ended; entries without them are
   first-to-10.
+
+- **The map is a property of the game, not of the app.** `g.map` (`mp`,
+  omitted for classic so classic blobs are unchanged) picks an entry in
+  `MAPS`; there is no global `GEO` any more, and pieces are packed as indices
+  into *that map's* `VIDX`/`EIDX`. `MAP_LIST`, `T_LIST` and `PH_LIST` are
+  append-only. The rematch card picks the next island; a different island
+  resets the win target to the map's own (New Shores: 14).
+- **New Shores (`shores`) rules that differ from classic:** sea hexes
+  produce nothing; ships (`g.ships`, `sh`) are a second edge table — an edge
+  holds a road or a ship, a road needs land beside it and a ship needs water,
+  and the two only join through your own town (also true for the longest
+  route). Setup towns go on the main island only. A gold hex pays a resource
+  of the owner's choice through a blocking `gold` phase (`pendingGold`, `pg`)
+  that mirrors the discard phase, stand-in draw included. Each small island
+  you have a town on is +2 (`islandsSettled`, read off the board). The robber
+  goes on any land hex, never sea. No pirate, and ships cannot be moved once
+  launched — both left out on purpose. The layout is our own, in the spirit
+  of "Heading for New Shores", not the printed map.
+
+- **The "masters" house rule (`rules.masters`, a 4th `ru` slot that is only
+  written when on)** adds two standing 2-point bonuses that everyone can
+  hold at once: Harbormaster (towns on two different harbours) and Desert
+  Master (two towns around the desert). Both are read off the board in
+  `scoreFor`, so nothing extra travels. `setRules` refuses to switch it on
+  mid-game when the bonus would put someone at the target.
+
+- **A phone's seat follows its token, not the rematch button.** `makeRematch`
+  copies every seat's `tok` forward, and `seatByTok` looks through every
+  `harbor-tok-*` this phone holds, so a rematch reached by push, home list
+  or pasted link still lands seated. Only carrying the seat in `joinRematch`
+  shipped broken: everyone who didn't tap the button got "pick your seat".
+  `harbor-sawend-<arenaId>` records the last ending a phone has seen, which
+  drives the "Game N is over" card in the next game.
 
 - **Every 3rd game of an arena is a cup game** (`cupFor(gameNo)`, a pure
   function — nothing about the schedule travels). It plays normally and the

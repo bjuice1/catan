@@ -8,14 +8,16 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 const RES = ["brick", "lumber", "wool", "grain", "ore"];
 const RES_LABEL = { brick: "Brick", lumber: "Wood", wool: "Bas", grain: "Wheat", ore: "Ore" };
 const RES_ICON = { brick: "🧱", lumber: "🪵", wool: "🐑", grain: "🌾", ore: "🪨" };
-const TERRAIN_ICON = { hills: "🧱", forest: "🌲", pasture: "🐑", fields: "🌾", mountains: "🪨", desert: "🏜️" };
+const TERRAIN_ICON = { hills: "🧱", forest: "🌲", pasture: "🐑", fields: "🌾", mountains: "🪨", desert: "🏜️", gold: "💰" };
 const TERRAIN_RES = {
   hills: "brick", forest: "lumber", pasture: "wool",
   fields: "grain", mountains: "ore", desert: null,
+  gold: null, sea: null, // gold pays whatever its neighbours choose — see distribute()
 };
 const HEX_FILL = {
   hills: "#a8563a", forest: "#2e5a3b", pasture: "#8fae57",
   fields: "#d7a83a", mountains: "#69727e", desert: "#cdbb8d",
+  gold: "#f3d65c", sea: "rgba(86,160,190,.07)",
 };
 const RES_COLOR = {
   brick: "#a8563a", lumber: "#2e5a3b", wool: "#8fae57",
@@ -55,8 +57,9 @@ const COST = {
   settlement: { brick: 1, lumber: 1, wool: 1, grain: 1 },
   city: { grain: 2, ore: 3 },
   dev: { wool: 1, grain: 1, ore: 1 },
+  ship: { lumber: 1, wool: 1 },
 };
-const LIMIT = { road: 15, settlement: 5, city: 4 };
+const LIMIT = { road: 15, settlement: 5, city: 4, ship: 15 };
 const SIZE = 10;
 const HW = Math.sqrt(3) * SIZE;
 
@@ -88,16 +91,24 @@ function hexCorners(cx, cy) {
   return out;
 }
 
-function baseGeometry() {
-  const rows = [3, 4, 5, 4, 3];
+/* ---------- maps ----------
+   A map is a fixed frame of hexes and which of them are sea. Its geometry is
+   built once at module load from fixed math and never serialised; a game
+   names its map (g.map, absent = classic) and every lookup goes through
+   geoOf(g). `kinds` is one letter per hex, row by row: M main island, S sea,
+   anything else a small island (settling one is worth bonus points). */
+function buildGeometry(rows, kinds, classicPorts) {
+  const mid = (rows.length - 1) / 2;
   const hexes = [];
   rows.forEach((n, r) => {
-    const y = (r - 2) * 1.5 * SIZE;
+    const y = (r - mid) * 1.5 * SIZE;
     const x0 = (-(n - 1) / 2) * HW;
     for (let i = 0; i < n; i++) {
-      hexes.push({ id: `h${hexes.length}`, cx: x0 + i * HW, cy: y, corners: [], verts: [] });
+      hexes.push({ id: `h${hexes.length}`, cx: x0 + i * HW, cy: y, corners: [], verts: [],
+        kind: kinds ? kinds[hexes.length] : "M" });
     }
   });
+  const byId = Object.fromEntries(hexes.map((h) => [h.id, h]));
 
   const vertexHexes = {};
   const vertexPos = {};
@@ -125,56 +136,124 @@ function baseGeometry() {
     (vertexEdges[b] = vertexEdges[b] || []).push(e);
   });
 
-  // coastal edges, ordered around the ring
+  /* which landmass a corner stands on (undefined = open water). Landmasses
+     never touch, so a corner has at most one. */
+  const vertexLand = {};
+  Object.keys(vertexHexes).forEach((v) => {
+    const land = vertexHexes[v].map((id) => byId[id].kind).find((k) => k !== "S");
+    if (land) vertexLand[v] = land;
+  });
+  /* a road needs land beside it; a ship needs water — the edge of the frame
+     counts as water, so a coast edge takes either */
+  const edgeLand = {}, edgeSea = {};
+  Object.keys(edgeHexes).forEach((e) => {
+    const ks = edgeHexes[e].map((id) => byId[id].kind);
+    edgeLand[e] = ks.some((k) => k !== "S");
+    edgeSea[e] = ks.length === 1 || ks.includes("S");
+  });
+
+  const mids = (e) => {
+    const [a, b] = ends(e);
+    return { mx: (vertexPos[a].x + vertexPos[b].x) / 2, my: (vertexPos[a].y + vertexPos[b].y) / 2 };
+  };
+  // the frame's outer edges, ordered around the ring
   const coast = Object.keys(edgeHexes)
     .filter((e) => edgeHexes[e].length === 1)
-    .map((e) => {
-      const [a, b] = ends(e);
-      const mx = (vertexPos[a].x + vertexPos[b].x) / 2;
-      const my = (vertexPos[a].y + vertexPos[b].y) / 2;
-      return { e, ang: Math.atan2(my, mx), mx, my };
-    })
+    .map((e) => { const m = mids(e); return { e, ang: Math.atan2(m.my, m.mx), ...m }; })
     .sort((p, q) => p.ang - q.ang);
 
-  return { hexes, vertexPos, vertexHexes, vertexEdges, edgeHexes, coast };
-}
+  /* where the ports sit: fixed spots, only their types are shuffled */
+  let portSpots;
+  if (classicPorts) {
+    portSpots = classicPorts.map((s) => {
+      const c = coast[s % coast.length];
+      const len = Math.hypot(c.mx, c.my) || 1;
+      return { e: c.e, mx: c.mx, my: c.my, px: c.mx + (c.mx / len) * 6.2, py: c.my + (c.my / len) * 6.2 };
+    });
+  } else {
+    // eight spots spread around the main island's shore, each facing out to sea
+    const main = hexes.filter((h) => h.kind === "M");
+    const ox = main.reduce((t, h) => t + h.cx, 0) / main.length, oy = main.reduce((t, h) => t + h.cy, 0) / main.length;
+    const shore = Object.keys(edgeHexes)
+      .filter((e) => edgeHexes[e].filter((id) => byId[id].kind === "M").length === 1 && edgeHexes[e].every((id) => "MS".includes(byId[id].kind)))
+      .map((e) => { const m = mids(e); return { e, ang: Math.atan2(m.my - oy, m.mx - ox), ...m }; })
+      .sort((p, q) => p.ang - q.ang);
+    portSpots = Array.from({ length: 8 }, (_, i) => {
+      const c = shore[Math.round((i * shore.length) / 8) % shore.length];
+      const h = byId[edgeHexes[c.e].find((id) => byId[id].kind === "M")];
+      const len = Math.hypot(c.mx - h.cx, c.my - h.cy) || 1;
+      return { e: c.e, mx: c.mx, my: c.my, px: c.mx + ((c.mx - h.cx) / len) * 6.2, py: c.my + ((c.my - h.cy) / len) * 6.2 };
+    });
+  }
 
-const GEO = baseGeometry();
-
-function hexNeighbors(hexes) {
   const nb = {};
   hexes.forEach((a) => {
-    nb[a.id] = [];
-    hexes.forEach((b) => {
-      if (a.id === b.id) return;
-      const shared = a.verts.filter((v) => b.verts.includes(v)).length;
-      if (shared === 2) nb[a.id].push(b.id);
-    });
+    nb[a.id] = hexes.filter((b) => a.id !== b.id && a.verts.filter((v) => b.verts.includes(v)).length === 2).map((b) => b.id);
   });
-  return nb;
+
+  /* codec indices: pieces travel as positions in these sorted lists */
+  const VIDX = Object.keys(vertexPos).sort();
+  const EIDX = Object.keys(edgeHexes).sort();
+  const vI = Object.fromEntries(VIDX.map((v, i) => [v, i]));
+  const eI = Object.fromEntries(EIDX.map((e, i) => [e, i]));
+  const hI = Object.fromEntries(hexes.map((h, i) => [h.id, i]));
+
+  const xs = VIDX.map((v) => vertexPos[v].x), ys = VIDX.map((v) => vertexPos[v].y);
+  const pad = 11; // room for the port discs outside the frame
+  const box = [Math.min(...xs) - pad, Math.min(...ys) - pad, Math.max(...xs) - Math.min(...xs) + 2 * pad, Math.max(...ys) - Math.min(...ys) + 2 * pad];
+
+  return { hexes, byId, vertexPos, vertexHexes, vertexEdges, edgeHexes, vertexLand, edgeLand, edgeSea,
+    coast, portSpots, nb, VIDX, EIDX, vI, eI, hI, box };
 }
-const HEX_NB = hexNeighbors(GEO.hexes);
 
-function makeBoard() {
-  const terrain = shuffle([
-    ...Array(4).fill("forest"), ...Array(4).fill("pasture"), ...Array(4).fill("fields"),
-    ...Array(3).fill("hills"), ...Array(3).fill("mountains"), "desert",
-  ]);
-  const tokens = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
+const rep = (n, x) => Array(n).fill(x);
+const MAPS = {
+  classic: {
+    name: "Classic", blurb: "The one island you know.", win: 10, ships: false,
+    geo: buildGeometry([3, 4, 5, 4, 3], null, [0, 3, 7, 10, 13, 17, 20, 23, 27]),
+    box: [-58, -54, 116, 108], // the hand-tuned frame the classic board has always had
+    main: [...rep(4, "forest"), ...rep(4, "pasture"), ...rep(4, "fields"), ...rep(3, "hills"), ...rep(3, "mountains"), "desert"],
+    mainNums: [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12],
+    isle: [], isleNums: [],
+    ports: ["any", "any", "any", "any", "brick", "lumber", "wool", "grain", "ore"],
+  },
+  /* in the spirit of Seafarers' "Heading for New Shores": a main island to
+     start on, three small ones across the water, gold on the far shores */
+  shores: {
+    name: "New Shores", blurb: "Ships, gold, and three islands across the water. First to 14.", win: 14, ships: true,
+    geo: buildGeometry([4, 5, 6, 7, 6, 5, 4], "MMSA" + "MMMSA" + "MMMMSS" + "SMMMSSB" + "SMMSSB" + "SSSCS" + "SCCS"),
+    main: [...rep(3, "forest"), ...rep(3, "pasture"), ...rep(3, "fields"), ...rep(2, "hills"), ...rep(2, "mountains"), "desert"],
+    mainNums: [2, 3, 3, 4, 5, 5, 6, 8, 9, 10, 10, 11, 12],
+    isle: ["gold", "gold", "hills", "mountains", "forest", "pasture", "fields"],
+    isleNums: [3, 4, 5, 6, 8, 9, 11],
+    ports: ["any", "any", "any", "brick", "lumber", "wool", "grain", "ore"],
+  },
+};
+/* codec index of a map — append only, these are baked into live blobs */
+const MAP_LIST = ["classic", "shores"];
+const mapOf = (g) => MAPS[g && g.map] || MAPS.classic;
+const geoOf = (g) => mapOf(g).geo;
+if (typeof window !== "undefined" && window.HARBOR_DEBUG) window.HARBOR_DEBUG.maps = MAPS; // smoke test only
 
+const layPorts = (geo, types) => geo.portSpots.map((s, i) => {
+  const [a, b] = ends(s.e);
+  return { type: types[i], edge: s.e, verts: [a, b], mx: s.mx, my: s.my, px: s.px, py: s.py };
+});
+
+function makeBoard(mapId) {
+  const M = MAPS[mapId] || MAPS.classic, geo = M.geo;
   let hexes = null;
   for (let attempt = 0; attempt < 800; attempt++) {
-    const t = attempt === 0 ? terrain : shuffle(terrain);
-    const nums = shuffle(tokens);
-    let k = 0;
-    const cand = GEO.hexes.map((h, i) => ({
-      id: h.id, cx: h.cx, cy: h.cy, verts: h.verts,
-      terrain: t[i],
-      number: t[i] === "desert" ? null : nums[k++],
-    }));
+    const main = shuffle(M.main), isle = shuffle(M.isle);
+    const mainNums = shuffle(M.mainNums), isleNums = shuffle(M.isleNums);
+    const cand = geo.hexes.map((h) => {
+      const terrain = h.kind === "S" ? "sea" : h.kind === "M" ? main.pop() : isle.pop();
+      const number = terrain === "sea" || terrain === "desert" ? null : h.kind === "M" ? mainNums.pop() : isleNums.pop();
+      return { id: h.id, cx: h.cx, cy: h.cy, verts: h.verts, terrain, number };
+    });
     const byId = Object.fromEntries(cand.map((h) => [h.id, h]));
     const bad = cand.some((h) =>
-      HEX_NB[h.id].some((n) => {
+      geo.nb[h.id].some((n) => {
         const o = byId[n];
         if (!h.number || !o.number) return false;
         const red = (x) => x === 6 || x === 8;
@@ -185,61 +264,71 @@ function makeBoard() {
     if (attempt === 799) hexes = cand;
   }
 
-  const portTypes = shuffle(["any", "any", "any", "any", "brick", "lumber", "wool", "grain", "ore"]);
-  const slots = [0, 3, 7, 10, 13, 17, 20, 23, 27];
-  const ports = slots.map((s, i) => {
-    const c = GEO.coast[s % GEO.coast.length];
-    const [a, b] = ends(c.e);
-    return { type: portTypes[i], edge: c.e, verts: [a, b], mx: c.mx, my: c.my };
-  });
-
   return {
     hexes,
-    ports,
+    ports: layPorts(geo, shuffle(M.ports)),
     robber: hexes.find((h) => h.terrain === "desert").id,
   };
 }
 
 /* ---------- board lookups ---------- */
 const hexById = (board, id) => board.hexes.find((h) => h.id === id);
-const vertexHexIds = (v) => GEO.vertexHexes[v] || [];
-const vertexNeighborVerts = (v) =>
-  (GEO.vertexEdges[v] || []).map((e) => { const [a, b] = ends(e); return a === v ? b : a; });
+const vertexHexIds = (g, v) => geoOf(g).vertexHexes[v] || [];
+const vertexNeighborVerts = (g, v) =>
+  (geoOf(g).vertexEdges[v] || []).map((e) => { const [a, b] = ends(e); return a === v ? b : a; });
 
 /* ---------- placement legality ---------- */
 function canPlaceSettlement(g, v, p, setup) {
+  const geo = geoOf(g);
   if (g.buildings[v]) return false;
-  if (vertexNeighborVerts(v).some((n) => g.buildings[n])) return false;
+  /* towns stand on land; the first two go on the main island */
+  if (!geo.vertexLand[v] || (setup && geo.vertexLand[v] !== "M")) return false;
+  if (vertexNeighborVerts(g, v).some((n) => g.buildings[n])) return false;
   /* house rule (off when rules.classic): no towns mid-run of a single
      colour's road — a corner where two or more roads meet is only buildable
      when different colours contest it. Classic Catan allows it, which is how
      you cut an opponent's longest road. (Player 0 is falsy: compare against
      undefined, never truthiness.) */
   if (!g.rules?.classic) {
-    const roadOwners = (GEO.vertexEdges[v] || []).filter((e) => g.roads[e] !== undefined).map((e) => g.roads[e]);
+    const roadOwners = (geo.vertexEdges[v] || []).filter((e) => g.roads[e] !== undefined).map((e) => g.roads[e]);
     if (roadOwners.length >= 2 && new Set(roadOwners).size === 1) return false;
   }
   if (setup) return true;
-  return (GEO.vertexEdges[v] || []).some((e) => g.roads[e] === p);
+  return (geo.vertexEdges[v] || []).some((e) => g.roads[e] === p || shipAt(g, e) === p);
 }
-function canPlaceRoad(g, e, p, restrictVertex) {
-  if (g.roads[e] !== undefined) return false;
+/* ships live in their own table so an old blob simply has none; an edge
+   holds a road or a ship, never both. (Owner 0 is falsy — compare to undefined.) */
+/* a seat the game is waiting on besides the player whose turn it is */
+const owes = (g, p) => (g.pendingDiscard[p] || 0) > 0 || ((g.pendingGold || {})[p] || 0) > 0;
+const shipAt = (g, e) => (g.ships ? g.ships[e] : undefined);
+const edgeTaken = (g, e) => g.roads[e] !== undefined || shipAt(g, e) !== undefined;
+/* A road or ship joins your own town, or more of its own kind — a road never
+   continues straight out of a ship or the other way round; that junction
+   needs a town. `lines` is the table of the kind being built. */
+function canPlaceEdge(g, e, p, restrictVertex, lines) {
+  if (edgeTaken(g, e)) return false;
   const [a, b] = ends(e);
   if (restrictVertex) return a === restrictVertex || b === restrictVertex;
   const touches = (v) => {
     const b2 = g.buildings[v];
     if (b2 && b2.owner === p) return true;
     if (b2 && b2.owner !== p) return false; // can't build through an opponent's town
-    return (GEO.vertexEdges[v] || []).some((x) => g.roads[x] === p);
+    return (geoOf(g).vertexEdges[v] || []).some((x) => lines[x] === p);
   };
   return touches(a) || touches(b);
 }
+const canPlaceRoad = (g, e, p, restrictVertex) =>
+  geoOf(g).edgeLand[e] && canPlaceEdge(g, e, p, restrictVertex, g.roads);
+const canPlaceShip = (g, e, p, restrictVertex) =>
+  mapOf(g).ships && geoOf(g).edgeSea[e] && canPlaceEdge(g, e, p, restrictVertex, g.ships || {});
 const legalSettlements = (g, p, setup) =>
-  Object.keys(GEO.vertexPos).filter((v) => canPlaceSettlement(g, v, p, setup));
+  Object.keys(geoOf(g).vertexPos).filter((v) => canPlaceSettlement(g, v, p, setup));
 const legalCities = (g, p) =>
   Object.keys(g.buildings).filter((v) => g.buildings[v].owner === p && g.buildings[v].type === "settlement");
 const legalRoads = (g, p, restrictVertex) =>
-  Object.keys(GEO.edgeHexes).filter((e) => canPlaceRoad(g, e, p, restrictVertex));
+  Object.keys(geoOf(g).edgeHexes).filter((e) => canPlaceRoad(g, e, p, restrictVertex));
+const legalShips = (g, p, restrictVertex) =>
+  (mapOf(g).ships ? Object.keys(geoOf(g).edgeHexes).filter((e) => canPlaceShip(g, e, p, restrictVertex)) : []);
 
 /* ---------- economy ---------- */
 const canAfford = (hand, cost) => Object.keys(cost).every((r) => (hand[r] || 0) >= cost[r]);
@@ -247,6 +336,8 @@ const pay = (hand, cost) => { Object.keys(cost).forEach((r) => (hand[r] -= cost[
 const countOwned = (g, p, type) =>
   type === "road"
     ? Object.values(g.roads).filter((o) => o === p).length
+    : type === "ship"
+    ? Object.values(g.ships || {}).filter((o) => o === p).length
     : Object.values(g.buildings).filter((b) => b.owner === p && b.type === type).length;
 
 function portsFor(g, p) {
@@ -262,26 +353,33 @@ function tradeRate(g, p, res) {
   return 4;
 }
 
-/* ---------- longest road ---------- */
+/* ---------- longest road ----------
+   With ships it is the longest trade route: roads and ships count together,
+   but the route only passes from one kind to the other through your own town. */
 function longestRoadFor(g, p) {
-  const mine = Object.keys(g.roads).filter((e) => g.roads[e] === p);
+  const kind = {}; // edge -> "r" | "s"
+  Object.keys(g.roads).forEach((e) => { if (g.roads[e] === p) kind[e] = "r"; });
+  Object.keys(g.ships || {}).forEach((e) => { if (g.ships[e] === p) kind[e] = "s"; });
+  const mine = Object.keys(kind);
   if (!mine.length) return 0;
   const vE = {};
   mine.forEach((e) => { const [a, b] = ends(e); (vE[a] = vE[a] || []).push(e); (vE[b] = vE[b] || []).push(e); });
   const blocked = (v) => { const b = g.buildings[v]; return !!b && b.owner !== p; };
+  const home = (v) => { const b = g.buildings[v]; return !!b && b.owner === p; };
   let best = 0;
-  const walk = (v, used, start) => {
+  const walk = (v, used, from) => {
     if (used.size > best) best = used.size;
-    if (!start && blocked(v)) return;
+    if (from && blocked(v)) return;
     for (const e of vE[v] || []) {
       if (used.has(e)) continue;
+      if (from && kind[e] !== kind[from] && !home(v)) continue;
       const [a, b] = ends(e);
       used.add(e);
-      walk(a === v ? b : a, used, false);
+      walk(a === v ? b : a, used, e);
       used.delete(e);
     }
   };
-  mine.forEach((e) => { const [a, b] = ends(e); walk(a, new Set(), true); walk(b, new Set(), true); });
+  mine.forEach((e) => { const [a, b] = ends(e); walk(a, new Set(), null); walk(b, new Set(), null); });
   return best;
 }
 
@@ -307,8 +405,37 @@ function scoreFor(g, i, includeHidden) {
   let s = countOwned(g, i, "settlement") + countOwned(g, i, "city") * 2;
   if (g.longestRoad === i) s += 2;
   if (g.largestArmy === i) s += 2;
+  s += 2 * islandsSettled(g, i);
+  if (g.rules?.masters) s += (harbormaster(g, i) ? 2 : 0) + (desertMaster(g, i) ? 2 : 0);
   if (includeHidden) s += (g.devHands[i] || []).filter((c) => c.type === "vp").length;
   return s;
+}
+/* The "masters" house rule: two standing bonuses, 2 points each, open to
+   everyone at once (nobody takes them off you). Harbormaster: towns on two
+   different harbours. Desert Master: two towns around the desert — points
+   for settling land that pays nothing. Both are read off the board. */
+const ownsAt = (g, p, v) => !!g.buildings[v] && g.buildings[v].owner === p;
+const harboursHeld = (g, p) => g.board.ports.filter((pt) => pt.verts.some((v) => ownsAt(g, p, v))).length;
+const desertTowns = (g, p) => new Set(g.board.hexes.filter((h) => h.terrain === "desert").flatMap((h) => h.verts).filter((v) => ownsAt(g, p, v))).size;
+const harbormaster = (g, p) => harboursHeld(g, p) >= 2;
+const desertMaster = (g, p) => desertTowns(g, p) >= 2;
+/* say so the moment a new town earns one */
+function withMasters(g, p, place) {
+  const was = [harbormaster(g, p), desertMaster(g, p)];
+  place();
+  if (!g.rules?.masters) return;
+  if (!was[0] && harbormaster(g, p)) say(g, `⚓ ${pname(g, p)} is a Harbormaster — towns on two harbours, 2 bonus points.`);
+  if (!was[1] && desertMaster(g, p)) say(g, `🏜️ ${pname(g, p)} is a Desert Master — two towns on the desert, 2 bonus points.`);
+}
+/* how many small islands this player has a town on — each is worth 2 points
+   on top of the town. Buildings never come down, so it is read off the board. */
+function islandsSettled(g, p) {
+  const geo = geoOf(g), seen = new Set();
+  Object.keys(g.buildings).forEach((v) => {
+    const k = geo.vertexLand[v];
+    if (g.buildings[v].owner === p && k && k !== "M") seen.add(k);
+  });
+  return seen.size;
 }
 
 /* ---------- dev deck ---------- */
@@ -333,8 +460,9 @@ const DEV_TEXT = {
 };
 
 /* ---------- game creation ---------- */
-function newGame(code, names) {
-  const board = makeBoard();
+function newGame(code, names, mapId) {
+  const map = MAPS[mapId] ? mapId : "classic";
+  const board = makeBoard(map);
   const n = names.length;
   /* who goes first is random — the creator gets no edge */
   const base = shuffle(Array.from({ length: n }, (_, i) => i));
@@ -348,6 +476,9 @@ function newGame(code, names) {
     board,
     buildings: {},
     roads: {},
+    map, // which island this game is played on — see MAPS
+    ships: {}, // edge -> owner, like roads; only on maps with sea
+    pendingGold: {}, // seat -> resources still to choose after a gold hex paid out
     hands: names.map(() => emptyHand()),
     devHands: names.map(() => []),
     devDeck: makeDevDeck(),
@@ -400,7 +531,7 @@ const winAt = (g) => (typeof window !== "undefined" && window.HARBOR_WIN_AT) || 
    kind of game. A target someone already shows on the board is refused, so
    flipping a setting can never end the game on the spot (hidden point cards
    deliberately don't count: refusing on them would leak them). */
-const WIN_TARGETS = [8, 10, 12, 15];
+const WIN_TARGETS = [8, 10, 12, 14, 15];
 /* the thing you send after a slow player. Each phone picks its own; the
    pick rides with the poke (g.duckKind / g.duckWord) so every island shows
    the sender's creature and hears its cry. */
@@ -491,14 +622,20 @@ function rememberMascot(kind, word) {
 const mascotOf = (g) => MASCOTS[g?.duckKind] || MASCOTS.duck;
 const bubbleOf = (g) => (g?.duckWord || mascotOf(g).bubble).toUpperCase();
 const minWinTarget = (g) => Math.max(...g.players.map((_, i) => scoreFor(g, i, false))) + 1;
-const rulesLine = (r) => `First to ${r?.win || 10}${r?.friendly ? " · friendly robber" : ""}${r?.classic ? " · road-splitting towns" : ""}`;
+const mapLine = (g) => (mapOf(g) === MAPS.classic ? "" : ` · ${mapOf(g).name}`);
+const rulesLine = (r) => `First to ${r?.win || 10}${r?.friendly ? " · friendly robber" : ""}${r?.classic ? " · road-splitting towns" : ""}${r?.masters ? " · masters" : ""}`;
+const MASTERS_HINT = "+2 for towns on two harbours, +2 for two towns around the desert";
+/* switching the masters on mid-game must not hand anyone the win on the spot */
+const mastersWouldWin = (g, win) => g.players.some((_, i) => scoreFor({ ...g, rules: { ...g.rules, masters: true } }, i, false) >= win);
 function setRules(g, by, next) {
   if (g.winner != null) return false;
-  const cur = { win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic };
+  const cur = { win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic, masters: !!g.rules?.masters };
   const win = WIN_TARGETS.includes(next.win) ? next.win : cur.win;
   if (win !== cur.win && win < minWinTarget(g)) return false;
-  const out = { win, friendly: !!next.friendly, classic: !!next.classic };
-  if (out.win === cur.win && out.friendly === cur.friendly && out.classic === cur.classic) return false;
+  const out = { win, friendly: !!next.friendly, classic: !!next.classic, masters: !!next.masters };
+  if (out.masters && !cur.masters && mastersWouldWin(g, out.win)) return false;
+  if (out.win === cur.win && out.friendly === cur.friendly && out.classic === cur.classic && out.masters === cur.masters) return false;
+  if (out.masters !== cur.masters) say(g, `${pname(g, by)} turned the masters bonuses ${out.masters ? "on" : "off"}.`);
   if (out.win !== cur.win) say(g, `${pname(g, by)} changed the game to first to ${out.win}.`);
   if (out.classic !== cur.classic) say(g, `${pname(g, by)} turned road-splitting towns ${out.classic ? "on" : "off"}.`);
   if (out.friendly !== cur.friendly) say(g, `${pname(g, by)} turned the friendly robber ${out.friendly ? "on" : "off"}.`);
@@ -571,6 +708,9 @@ function lobbyRemoveSeat(g, i) {
   reassignColors(g);
   resetLobbyOrder(g);
   say(g, "A seat was removed.");
+  /* the game starts itself the moment every seat is taken — and trimming the
+     last empty seat is one way to get there (it used to strand the lobby) */
+  startLobby(g, false);
   return g;
 }
 function lobbyAddSeat(g) {
@@ -651,11 +791,12 @@ const histEntry = (g) => {
     w: g.winner, o: g.setupOrder.slice(0, g.players.length).join(""),
     t: g.rules?.win || 10, c: g.rules?.classic ? 1 : 0,
     ...(k >= 0 ? { k, cw: cupWinners(g).join("") } : {}),
+    ...(g.map && g.map !== "classic" ? { m: g.map } : {}),
   };
 };
 /* same crew, fresh island — everyone is already seated, so it starts at once */
-function makeRematch(prev, code) {
-  const g = newGame(code, prev.players.map((p) => p.name));
+function makeRematch(prev, code, mapId) {
+  const g = newGame(code, prev.players.map((p) => p.name), mapId || prev.map);
   g.hostTok = prev.hostTok;
   prev.players.forEach((p, i) => {
     g.players[i].claimed = true;
@@ -669,9 +810,11 @@ function makeRematch(prev, code) {
   g.arena = { id: prev.arena?.id || g.arena.id, name: prev.arena?.name || "" };
   g.gameNo = (prev.gameNo || 1) + 1;
   g.rules = { ...(prev.rules || { win: 10, friendly: false }) };
+  /* a different island brings its own target; the same island keeps the crew's */
+  if (g.map !== (prev.map || "classic")) g.rules.win = MAPS[g.map].win;
   g.seriesStats = prev.players.map((_, i) =>
     [0, 1, 2].map((k) => (prev.seriesStats?.[i]?.[k] || 0) + (prev.stats?.[i]?.[k] || 0)));
-  g.log = [{ t: Date.now(), m: `Rematch — game ${g.gameNo} of the series.` }];
+  g.log = [{ t: Date.now(), m: `Rematch — game ${g.gameNo} of the series${g.map === "classic" ? "" : `, on ${MAPS[g.map].name} (first to ${g.rules.win})`}.` }];
   if (cupOf(g) >= 0) say(g, cupLine(g));
   startLobby(g, false);
   return g;
@@ -721,12 +864,12 @@ function startLobby(g, dropOpen) {
 /* ---------- setup phase ---------- */
 function placeSetupTown(g, v, p) {
   if (g.phase !== "setupTown" || g.buildings[v]) return false;
-  g.buildings[v] = { owner: p, type: "settlement" };
+  withMasters(g, p, () => { g.buildings[v] = { owner: p, type: "settlement" }; });
   g.lastSetupVertex = v;
   g.phase = "setupRoad";
   say(g, `${pname(g, p)} founded a town.`);
   if (g.setupIdx >= g.players.length) {
-    vertexHexIds(v).forEach((hid) => {
+    vertexHexIds(g, v).forEach((hid) => {
       const h = hexById(g.board, hid);
       const r = TERRAIN_RES[h.terrain];
       if (r && g.bank[r] > 0) { g.hands[p][r] += 1; g.bank[r] -= 1; }
@@ -735,9 +878,10 @@ function placeSetupTown(g, v, p) {
   }
   return g;
 }
-function placeSetupRoad(g, e, p) {
-  if (g.phase !== "setupRoad" || g.roads[e] !== undefined) return false;
-  g.roads[e] = p;
+function placeSetupRoad(g, e, p, ship) {
+  if (g.phase !== "setupRoad" || edgeTaken(g, e)) return false;
+  if (ship ? !canPlaceShip(g, e, p, g.lastSetupVertex) : !canPlaceRoad(g, e, p, g.lastSetupVertex)) return false;
+  if (ship) { g.ships = g.ships || {}; g.ships[e] = p; } else g.roads[e] = p;
   g.setupIdx += 1;
   g.lastSetupVertex = null;
   if (g.setupIdx >= g.setupOrder.length) {
@@ -756,14 +900,17 @@ function placeSetupRoad(g, e, p) {
 /* ---------- rolling & production ---------- */
 function distribute(g, roll) {
   const claims = {}; // res -> [{p, n}]
+  const gold = {}; // seat -> picks owed: a gold hex pays a resource of your choice
   g.board.hexes.forEach((h) => {
     if (h.number !== roll || g.board.robber === h.id) return;
     const r = TERRAIN_RES[h.terrain];
-    if (!r) return;
+    if (!r && h.terrain !== "gold") return;
     h.verts.forEach((v) => {
       const b = g.buildings[v];
       if (!b) return;
-      (claims[r] = claims[r] || []).push({ p: b.owner, n: b.type === "city" ? 2 : 1 });
+      const n = b.type === "city" ? 2 : 1;
+      if (h.terrain === "gold") gold[b.owner] = (gold[b.owner] || 0) + n;
+      else (claims[r] = claims[r] || []).push({ p: b.owner, n });
     });
   });
   const gained = {};
@@ -788,7 +935,39 @@ function distribute(g, roll) {
   const parts = Object.keys(gained).map(
     (p) => `${pname(g, +p)} +${Object.entries(gained[p]).map(([r, n]) => `${n} ${RES_LABEL[r].toLowerCase()}`).join(", ")}`
   );
+  /* nobody can choose more than the bank still holds */
+  const left = RES.reduce((t, r) => t + g.bank[r], 0);
+  Object.keys(gold).forEach((p) => { gold[p] = Math.min(gold[p], left); if (!gold[p]) delete gold[p]; });
+  if (Object.keys(gold).length) parts.push(...Object.keys(gold).map((p) => `${pname(g, +p)} struck gold (${gold[p]})`));
   say(g, parts.length ? parts.join(" · ") : "Nobody collected anything.");
+  g.pendingGold = gold;
+}
+
+/* Gold: each owed player picks their own resources; the turn waits for them
+   the same way a seven waits for discards. */
+function takeGold(g, p, sel, deputy) {
+  const owed = (g.pendingGold || {})[p];
+  if (g.phase !== "gold" || !owed) return false;
+  if (handTotal(sel) !== owed || !RES.every((r) => g.bank[r] >= (sel[r] || 0))) return false;
+  RES.forEach((r) => { g.hands[p][r] += sel[r] || 0; g.bank[r] -= sel[r] || 0; });
+  if (g.stats?.[p]) g.stats[p][0] += owed;
+  delete g.pendingGold[p];
+  say(g, deputy == null
+    ? `${pname(g, p)} took ${fmtHand(sel)} for their gold.`
+    : `${pname(g, deputy)} drew ${fmtHand(sel)} at random for ${pname(g, p)}'s gold (they were away).`);
+  if (!Object.keys(g.pendingGold).length) g.phase = "main";
+  return g;
+}
+/* a table-mate draws random gold for a player who has wandered off */
+function deputyGold(g, p, by) {
+  const owed = (g.pendingGold || {})[p];
+  if (!owed) return false;
+  const pool = [];
+  RES.forEach((r) => { for (let i = 0; i < g.bank[r]; i++) pool.push(r); });
+  const sel = emptyHand();
+  for (let i = 0; i < owed && pool.length; i++) sel[pool.splice(Math.floor(Math.random() * pool.length), 1)[0]] += 1;
+  if (handTotal(sel) !== owed) return false;
+  return takeGold(g, p, sel, by);
 }
 
 function rollDice(g) {
@@ -816,7 +995,8 @@ function rollDice(g) {
     }
   } else {
     distribute(g, sum);
-    g.phase = "main";
+    if (Object.keys(g.pendingGold).length) { g.phase = "gold"; g.sevenAt = Date.now(); } // sevenAt times the stand-in, as for discards
+    else g.phase = "main";
   }
   return g;
 }
@@ -853,8 +1033,9 @@ function deputyDiscard(g, p, by) {
 
 function moveRobber(g, hid, p) {
   if (g.phase !== "robber") return false; // double-tap or rebase replay
-  g.board.robber = hid;
   const h = hexById(g.board, hid);
+  if (!h || h.terrain === "sea") return false; // any land, small islands included — never open water
+  g.board.robber = hid;
   const victims = new Set();
   h.verts.forEach((v) => {
     const b = g.buildings[v];
@@ -895,7 +1076,7 @@ function stealFrom(g, victim, p) {
 
 /* ---------- building ---------- */
 function buildRoad(g, e, p) {
-  if (g.roads[e] !== undefined) return false;
+  if (!canPlaceRoad(g, e, p, null)) return false;
   const free = g.freeRoads > 0;
   if (!free && !canAfford(g.hands[p], COST.road)) return false;
   if (free) {
@@ -909,13 +1090,34 @@ function buildRoad(g, e, p) {
   say(g, `${pname(g, p)} built a road${free ? " (free)" : ""}.`);
   return g;
 }
+/* road building's free pieces may be ships too */
+function buildShip(g, e, p) {
+  if (!canPlaceShip(g, e, p, null) || countOwned(g, p, "ship") >= LIMIT.ship) return false;
+  const free = g.freeRoads > 0;
+  if (!free && !canAfford(g.hands[p], COST.ship)) return false;
+  if (free) {
+    g.freeRoads -= 1;
+  } else {
+    pay(g.hands[p], COST.ship);
+    RES.forEach((r) => { g.bank[r] += COST.ship[r] || 0; });
+  }
+  g.ships = g.ships || {};
+  g.ships[e] = p;
+  recomputeAwards(g);
+  say(g, `${pname(g, p)} launched a ship${free ? " (free)" : ""}.`);
+  return g;
+}
 function buildTown(g, v, p) {
   if (g.buildings[v] || !canAfford(g.hands[p], COST.settlement)) return false;
   pay(g.hands[p], COST.settlement);
   RES.forEach((r) => { g.bank[r] += COST.settlement[r] || 0; });
-  g.buildings[v] = { owner: p, type: "settlement" };
-  recomputeAwards(g);
-  say(g, `${pname(g, p)} built a town.`);
+  const landed = geoOf(g).vertexLand[v] !== "M" && islandsSettled(g, p);
+  withMasters(g, p, () => {
+    g.buildings[v] = { owner: p, type: "settlement" };
+    recomputeAwards(g);
+    say(g, `${pname(g, p)} built a town.`);
+  });
+  if (landed !== false && islandsSettled(g, p) > landed) say(g, `🏝️ ${pname(g, p)} settled a new island — 2 bonus points.`);
   return g;
 }
 function buildCity(g, v, p) {
@@ -1051,17 +1253,11 @@ function endTurn(g) {
 /* ============================================================
    Codec — the whole game squeezed into a URL
    ============================================================ */
-const T_LIST = ["hills", "forest", "pasture", "fields", "mountains", "desert"];
+const T_LIST = ["hills", "forest", "pasture", "fields", "mountains", "desert", "sea", "gold"]; // append only
 const P_LIST = ["any", "brick", "lumber", "wool", "grain", "ore"];
 const D_LIST = ["knight", "vp", "road", "plenty", "monopoly"];
-/* "lobby" must stay LAST — these indices are baked into every live blob */
-const PH_LIST = ["setupTown", "setupRoad", "roll", "main", "discard", "robber", "steal", "over", "lobby"];
-
-const VIDX = Object.keys(GEO.vertexPos).sort();
-const EIDX = Object.keys(GEO.edgeHexes).sort();
-const vI = Object.fromEntries(VIDX.map((v, i) => [v, i]));
-const eI = Object.fromEntries(EIDX.map((e, i) => [e, i]));
-const hI = Object.fromEntries(GEO.hexes.map((h, i) => [h.id, i]));
+/* append only — these indices are baked into every live blob */
+const PH_LIST = ["setupTown", "setupRoad", "roll", "main", "discard", "robber", "steal", "over", "lobby", "gold"];
 
 /* the arena is the whole rematch chain: one id for its lifetime, a name the
    crew can change */
@@ -1075,6 +1271,11 @@ function makeCode4() {
 }
 
 function pack(g) {
+  const { vI, eI, hI } = geoOf(g);
+  const flatS = [];
+  Object.entries(g.ships || {}).forEach(([e, o]) => flatS.push(eI[e], o));
+  const flatPG = [];
+  Object.entries(g.pendingGold || {}).forEach(([p, n]) => flatPG.push(+p, n));
   const flatB = [];
   Object.entries(g.buildings).forEach(([v, b]) => flatB.push(vI[v], b.owner, b.type === "city" ? 1 : 0));
   const flatR = [];
@@ -1120,6 +1321,11 @@ function pack(g) {
     lv: g.lastSetupVertex == null ? -1 : vI[g.lastSetupVertex],
     d: g.dice || 0,
     pd: flatPD,
+    /* the map and its extras only ride along off the classic island, so a
+       classic blob is byte-for-byte what it always was (undefined drops out) */
+    mp: g.map && g.map !== "classic" ? MAP_LIST.indexOf(g.map) : undefined,
+    sh: flatS.length ? flatS : undefined,
+    pg: flatPG.length ? flatPG : undefined,
     sf: g.stealFrom,
     rr: PH_LIST.indexOf(g.robberReturn),
     fr: g.freeRoads,
@@ -1128,13 +1334,14 @@ function pack(g) {
     rm: g.rematch || "",
     ws: (g.wins || []).join(","),
     hi: (g.history || []).map((h) => h.w + ":" + h.o + (h.t ? ":" + h.t + ":" + (h.c ? 1 : 0) : "")
-      + (h.t && h.k != null ? ":" + h.k + ":" + (h.cw || "") : "")),
+      + (h.t && (h.k != null || h.m) ? ":" + (h.k != null ? h.k : "") + ":" + (h.cw || "") : "")
+      + (h.t && h.m ? ":" + MAP_LIST.indexOf(h.m) : "")),
     /* trophies only ride along once someone has one — undefined drops out of the JSON */
     tp: (g.trophies || []).some((r) => r.some(Boolean)) ? g.trophies : undefined,
     ar: [g.arena?.id || "", g.arena?.name || ""],
     gn: g.gameNo || 1,
     av: Math.max(g.appV || 0, APP_V),
-    ru: [g.rules?.win || 10, g.rules?.friendly ? 1 : 0, g.rules?.classic ? 1 : 0],
+    ru: [g.rules?.win || 10, g.rules?.friendly ? 1 : 0, g.rules?.classic ? 1 : 0, ...(g.rules?.masters ? [1] : [])],
     st: g.stats || g.players.map(() => [0, 0, 0]),
     ss: g.seriesStats || g.players.map(() => [0, 0, 0]),
     lg: g.log.slice(-30).map((l) => l.m),
@@ -1142,22 +1349,23 @@ function pack(g) {
 }
 
 function unpack(o) {
+  const map = MAP_LIST[o.mp] || "classic";
+  const geo = MAPS[map].geo, { VIDX, EIDX } = geo;
   const nums = o.m.split(",").map(Number);
-  const hexes = GEO.hexes.map((h, i) => ({
+  const hexes = geo.hexes.map((h, i) => ({
     id: h.id, cx: h.cx, cy: h.cy, verts: h.verts,
     terrain: T_LIST[+o.t[i]],
     number: nums[i] || null,
   }));
-  const slots = [0, 3, 7, 10, 13, 17, 20, 23, 27];
-  const ports = slots.map((s, i) => {
-    const c = GEO.coast[s % GEO.coast.length];
-    const [a, b] = ends(c.e);
-    return { type: P_LIST[+o.pt[i]], edge: c.e, verts: [a, b], mx: c.mx, my: c.my };
-  });
+  const ports = layPorts(geo, [...o.pt].map((c) => P_LIST[+c]));
   const buildings = {};
   for (let i = 0; i < o.b.length; i += 3) buildings[VIDX[o.b[i]]] = { owner: o.b[i + 1], type: o.b[i + 2] ? "city" : "settlement" };
   const roads = {};
   for (let i = 0; i < o.r.length; i += 2) roads[EIDX[o.r[i]]] = o.r[i + 1];
+  const ships = {};
+  for (let i = 0; i < (o.sh || []).length; i += 2) ships[EIDX[o.sh[i]]] = o.sh[i + 1];
+  const pendingGold = {};
+  for (let i = 0; i < (o.pg || []).length; i += 2) pendingGold[o.pg[i]] = o.pg[i + 1];
   const pendingDiscard = {};
   for (let i = 0; i < o.pd.length; i += 2) pendingDiscard[o.pd[i]] = o.pd[i + 1];
   const n = o.n.length;
@@ -1171,8 +1379,9 @@ function unpack(o) {
     /* legacy blobs have no cl — everyone starts unclaimed and re-picks a seat */
     hostTok: o.ht || "",
     players: o.n.map((nm, i) => ({ name: nm, color: o.co ? o.co[i] : i, claimed: !!(o.cl && o.cl[i]), lock: (o.lk && o.lk[i]) || "", tok: (o.tk && o.tk[i]) || "" })),
-    board: { hexes, ports, robber: GEO.hexes[o.rb].id },
+    board: { hexes, ports, robber: geo.hexes[o.rb].id },
     buildings, roads,
+    map, ships, pendingGold,
     hands: o.h.map((x) => Object.fromEntries(RES.map((r, i) => [r, x[i]]))),
     bank: Object.fromEntries(RES.map((r, i) => [r, o.bk[i]])),
     devHands: o.dh.map((cards) => cards.map((c) => ({ type: D_LIST[c[0]], turn: c[1], used: !!c[2] }))),
@@ -1210,16 +1419,20 @@ function unpack(o) {
     rematch: o.rm || "",
     wins: o.ws ? o.ws.split(",").map(Number) : o.n.map(() => 0),
     history: (o.hi || []).map((s) => {
-      const [w, ord, t, c, k, cw] = s.split(":");
+      const [w, ord, t, c, k, cw, m] = s.split(":");
       if (!t) return { w: +w, o: ord };
-      return k !== undefined ? { w: +w, o: ord, t: +t, c: +c, k: +k, cw } : { w: +w, o: ord, t: +t, c: +c };
+      return {
+        w: +w, o: ord, t: +t, c: +c,
+        ...(k !== undefined && k !== "" ? { k: +k, cw } : {}),
+        ...(MAP_LIST[m] ? { m: MAP_LIST[m] } : {}),
+      };
     }),
     trophies: o.n.map((_, i) => CUPS.map((_, k) => (o.tp && o.tp[i] && o.tp[i][k]) || 0)),
     /* blobs from before arenas have no ar — the id is minted at the next rematch or rename */
     arena: { id: (o.ar && o.ar[0]) || "", name: (o.ar && o.ar[1]) || "" },
     gameNo: o.gn || 1,
     appV: o.av || 0,
-    rules: o.ru ? { win: o.ru[0] || 10, friendly: !!o.ru[1], classic: !!o.ru[2] } : { win: 10, friendly: false, classic: false },
+    rules: o.ru ? { win: o.ru[0] || 10, friendly: !!o.ru[1], classic: !!o.ru[2], masters: !!o.ru[3] } : { win: 10, friendly: false, classic: false, masters: false },
     stats: o.st || o.n.map(() => [0, 0, 0]),
     seriesStats: o.ss || o.n.map(() => [0, 0, 0]),
     log: o.lg.map((m) => ({ t: 0, m })),
@@ -1307,7 +1520,9 @@ async function serverPut(g, by) {
     by: by == null ? -1 : by,
     turn: g.turn, tn: g.turnNo,
     discard: Object.keys(g.pendingDiscard || {}).map(Number),
+    gold: Object.keys(g.pendingGold || {}).map(Number),
     winner: g.winner == null ? null : g.winner,
+    winnerName: g.winner == null ? null : pname(g, g.winner),
     tradeTo: g.trade ? g.trade.to : null,
     rematch: g.rematch || null,
     /* the server heads pings with this; cup games add the cup's name */
@@ -1346,6 +1561,37 @@ function makeTok(code) {
   t = Array.from({ length: 8 }, () => "abcdefghjkmnpqrstuvwxyz23456789"[Math.floor(Math.random() * 31)]).join("");
   try { window.localStorage.setItem(tokKey(code), t); } catch { /* best effort */ }
   return t;
+}
+/* A rematch copies every seat's token forward, so a phone that reaches the
+   new game any way other than the rematch button — a push, the home list, a
+   link in the chat — still holds the key to its seat, filed under an older
+   game's code. Find it, and file it under this one too. */
+function seatByTok(g) {
+  try {
+    const ls = window.localStorage;
+    let t = tokOf(g.code);
+    if (!t) {
+      const toks = new Set(g.players.map((p) => p.tok).filter(Boolean));
+      for (let i = 0; i < ls.length && !t; i++) {
+        const k = ls.key(i);
+        if (k && k.startsWith("harbor-tok-") && toks.has(ls.getItem(k))) t = ls.getItem(k);
+      }
+      if (t) ls.setItem(tokKey(g.code), t);
+    }
+    const idx = t ? g.players.findIndex((p) => p.tok === t) : -1;
+    return idx >= 0 ? idx : null;
+  } catch { return null; }
+}
+
+/* the last game of an arena whose ending this phone has actually looked at —
+   so a rematch opened cold can say how the one before it ended */
+const sawEndKey = (arenaId) => "harbor-sawend-" + arenaId;
+function sawEnd(arenaId) {
+  try { return +(window.localStorage.getItem(sawEndKey(arenaId)) || 0); } catch { return 0; }
+}
+function markSawEnd(arenaId, gameNo) {
+  if (!arenaId) return;
+  try { if (gameNo > sawEnd(arenaId)) window.localStorage.setItem(sawEndKey(arenaId), String(gameNo)); } catch { /* best effort */ }
 }
 
 /* a synthesised quack: two short falling honks. Best-effort — iOS only lets
@@ -1608,10 +1854,27 @@ function PieceIcon({ kind, color, size = 26 }) {
         </linearGradient>
       )}
       {kind === "road" && <rect x="2" y="7.5" width="16" height="5" rx="2.5" fill={fill} stroke={edge} strokeWidth="0.8" transform="rotate(-30 10 10)" />}
+      {kind === "ship" && <g><path d="M2.5,12 L17.5,12 L14.5,17 L5.5,17 Z" fill={fill} stroke={edge} strokeWidth="0.8" /><path d="M9.5,10.5 L9.5,2.5 L16,10.5 Z" fill="#f2ead6" stroke={edge} strokeWidth="0.7" /></g>}
       {kind === "town" && <polygon points="4,17 4,9 10,3.5 16,9 16,17" fill={fill} stroke={edge} strokeWidth="0.8" />}
       {kind === "city" && <g><rect x="2.5" y="10" width="15" height="7.5" fill={fill} stroke={edge} strokeWidth="0.8" /><polygon points="2.5,10 7.5,4 12.5,10" fill={fill} stroke={edge} strokeWidth="0.8" /></g>}
       {kind === "dev" && <g><rect x="5" y="2.5" width="10" height="15" rx="1.5" fill={fill} stroke={edge} strokeWidth="0.8" /><text x="10" y="13.6" textAnchor="middle" fontSize="9" fontFamily={dispFont} fontWeight="600" fill="rgba(6,20,25,.8)">?</text></g>}
     </svg>
+  );
+}
+/* which island to play: one button per map, the blurb of the chosen one below */
+function MapPick({ value, onChange }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", gap: 6 }}>
+        {MAP_LIST.map((m) => (
+          <button key={m} title={"map-" + m} onClick={() => onChange(m)} style={{ flex: 1,
+            background: value === m ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+            border: `1px solid ${value === m ? C.gold : C.line}`, color: value === m ? C.gold : C.parchDim,
+            borderRadius: 5, padding: "9px", fontFamily: dispFont, fontSize: 13, cursor: "pointer" }}>{MAPS[m].name}</button>
+        ))}
+      </div>
+      <div style={{ marginTop: 6, color: C.parchDim, fontSize: 12, lineHeight: 1.5 }}>{(MAPS[value] || MAPS.classic).blurb}</div>
+    </div>
   );
 }
 function Eyebrow({ children }) {
@@ -1740,6 +2003,8 @@ function Worm({ cx, cy, roar }) {
 /* board is unchanged from the shared-storage build */
 function Board({ g, sel, onPick, pending }) {
   const b = g.board;
+  const GEO = geoOf(g), { vI, eI } = GEO;
+  const box = mapOf(g).box || GEO.box;
   const opts = sel ? sel.options : null;
   const roadPath = (e) => {
     const [a, c] = ends(e);
@@ -1748,17 +2013,21 @@ function Board({ g, sel, onPick, pending }) {
     return { x1: p1.x + dx * 0.16, y1: p1.y + dy * 0.16, x2: p2.x - dx * 0.16, y2: p2.y - dy * 0.16 };
   };
   return (
-    <svg viewBox="-58 -54 116 108" preserveAspectRatio="xMidYMid meet"
+    <svg viewBox={box.join(" ")} preserveAspectRatio="xMidYMid meet"
       style={{ width: "100%", maxHeight: "52vh", display: "block", margin: "0 auto" }}>
       <defs>
         <radialGradient id="seaG" cx="50%" cy="45%" r="70%">
           <stop offset="0%" stopColor={C.sea} /><stop offset="100%" stopColor={C.seaDeep} />
         </radialGradient>
       </defs>
-      <rect x="-58" y="-54" width="116" height="108" fill="url(#seaG)" />
+      <rect x={box[0]} y={box[1]} width={box[2]} height={box[3]} fill="url(#seaG)" />
+      {/* open water first, so the port discs sit on top of it */}
+      {b.hexes.filter((h) => h.terrain === "sea").map((h) => (
+        <polygon key={h.id} points={hexCorners(h.cx, h.cy).map((p) => p.join(",")).join(" ")}
+          fill={HEX_FILL.sea} stroke="rgba(120,190,215,.16)" strokeWidth="0.4" />
+      ))}
       {b.ports.map((pt, i) => {
-        const len = Math.hypot(pt.mx, pt.my) || 1;
-        const px = pt.mx + (pt.mx / len) * 6.2, py = pt.my + (pt.my / len) * 6.2;
+        const px = pt.px, py = pt.py;
         return (
           <g key={i}>
             {pt.verts.map((v) => (
@@ -1787,7 +2056,7 @@ function Board({ g, sel, onPick, pending }) {
           </g>
         );
       })}
-      {b.hexes.map((h) => {
+      {b.hexes.filter((h) => h.terrain !== "sea").map((h) => {
         const pts = hexCorners(h.cx, h.cy).map((p) => p.join(",")).join(" ");
         const target = sel && sel.kind === "robber" && opts.has(h.id);
         return (
@@ -1842,6 +2111,25 @@ function Board({ g, sel, onPick, pending }) {
           </g>
         );
       })}
+      {/* a ship: a thin wake along its edge and a little boat at the middle */}
+      {Object.entries(g.ships || {}).map(([e, owner]) => {
+        const r = roadPath(e);
+        const c = g.players[owner].color;
+        const col = pieceFill(c, "s" + eI[e]);
+        const mx = (r.x1 + r.x2) / 2, my = (r.y1 + r.y2) / 2;
+        return (
+          <g key={"s" + e} className="hb-ship">
+            {c === MULTI && <RainbowDef id={"s" + eI[e]} x1={mx - 2.6} y1={my + 1} x2={mx + 2.6} y2={my - 3} />}
+            <line x1={r.x1} y1={r.y1} x2={r.x2} y2={r.y2} stroke={col} strokeWidth="0.9" strokeLinecap="round" strokeDasharray="1.2 1.1" />
+            <g className="hb-build">
+              <path d={`M ${mx - 2.6} ${my + 0.3} L ${mx + 2.6} ${my + 0.3} L ${mx + 1.6} ${my + 1.9} L ${mx - 1.6} ${my + 1.9} Z`}
+                fill={col} stroke="rgba(6,20,25,.8)" strokeWidth="0.4" />
+              <path d={`M ${mx - 0.2} ${my - 0.1} L ${mx - 0.2} ${my - 3.4} L ${mx + 2.1} ${my - 0.1} Z`}
+                fill="#f2ead6" stroke="rgba(6,20,25,.8)" strokeWidth="0.35" />
+            </g>
+          </g>
+        );
+      })}
       {Object.entries(g.buildings).map(([v, bl]) => {
         const p = GEO.vertexPos[v];
         const c = g.players[bl.owner].color;
@@ -1862,7 +2150,7 @@ function Board({ g, sel, onPick, pending }) {
           </g>
         );
       })}
-      {sel && sel.kind === "road" && [...opts].map((e) => {
+      {sel && (sel.kind === "road" || sel.kind === "ship") && [...opts].map((e) => {
         const r = roadPath(e);
         const aimed = pending && pending.id === e;
         return (
@@ -1904,7 +2192,11 @@ export default function App() {
   const [myWin, setMyWin] = useState(10);
   const [myFriendly, setMyFriendly] = useState(false);
   const [myClassic, setMyClassic] = useState(false);
+  const [myMap, setMyMap] = useState("classic");
+  const [myMasters, setMyMasters] = useState(false);
+  const [nextMap, setNextMap] = useState(null); // the island picked for the rematch; null = same again
   const [spectate, setSpectate] = useState(false);
+  const [, setSawTick] = useState(0); // re-render once the "last game" card is dismissed
   const [claimName, setClaimName] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [rejoinSel, setRejoinSel] = useState(null);
@@ -1937,7 +2229,7 @@ export default function App() {
   /* the board shakes when any piece lands — yours or theirs */
   useEffect(() => {
     if (!g) { pieceCount.current = 0; return; }
-    const n = Object.keys(g.roads).length + Object.keys(g.buildings).length;
+    const n = Object.keys(g.roads).length + Object.keys(g.buildings).length + Object.keys(g.ships || {}).length;
     const grew = pieceCount.current > 0 && n > pieceCount.current;
     pieceCount.current = n;
     if (grew) {
@@ -1961,7 +2253,11 @@ export default function App() {
 
   const adopt = (loaded) => {
     setG(loaded);
-    const s = knownSeat(loaded.code);
+    let s = knownSeat(loaded.code);
+    if (s == null || !loaded.players[s]) {
+      s = seatByTok(loaded);
+      if (s != null) rememberSeat(loaded.code, s);
+    }
     if (s != null && loaded.players[s]) { setSeat(s); rememberGame(loaded.code); }
   };
 
@@ -2023,7 +2319,7 @@ export default function App() {
         if (!res) return { code, gone: true };
         try {
           const gm = await decodeGame(res.blob);
-          const s = knownSeat(code);
+          const s = knownSeat(code) ?? seatByTok(gm);
           return {
             code,
             arena: gm.arena?.name || "",
@@ -2031,7 +2327,7 @@ export default function App() {
             gameNo: gm.gameNo || 1,
             names: gm.players.filter((p) => p.claimed).map((p) => p.name).join(", "),
             turnName: pname(gm, gm.turn),
-            myTurn: s != null && gm.winner == null && gm.phase !== "lobby" && (gm.turn === s || (gm.pendingDiscard[s] || 0) > 0),
+            myTurn: s != null && gm.winner == null && gm.phase !== "lobby" && (gm.turn === s || owes(gm, s)),
             over: gm.winner != null,
             rematch: gm.winner != null ? gm.rematch || "" : "",
             inLobby: gm.phase === "lobby",
@@ -2064,9 +2360,10 @@ export default function App() {
      must actually unseat the kicked phone */
   useEffect(() => {
     if (!g) return;
+    const byTok = seatByTok(g); // also inherits a token from an earlier game of the arena
     const t = tokOf(g.code);
     if (!t) return;
-    const idx = g.players.findIndex((p) => p.tok === t);
+    const idx = byTok == null ? -1 : byTok;
     if (idx >= 0) {
       if (idx !== seat) { setSeat(idx); rememberSeat(g.code, idx); }
     } else if (seat != null && g.phase === "lobby") {
@@ -2141,7 +2438,7 @@ export default function App() {
           return {
             code: it.code,
             arena: gm.arena?.name || "",
-            myTurn: s != null && gm.phase !== "lobby" && (gm.turn === s || (gm.pendingDiscard[s] || 0) > 0),
+            myTurn: s != null && gm.phase !== "lobby" && (gm.turn === s || owes(gm, s)),
           };
         } catch { return null; }
       }));
@@ -2159,7 +2456,8 @@ export default function App() {
     const cur = gRef.current;
     const kind = myMascot(), word = myWord();
     const M = MASCOTS[kind];
-    const targets = cur.phase === "discard" ? Object.keys(cur.pendingDiscard).map(Number) : [cur.turn];
+    const targets = cur.phase === "discard" ? Object.keys(cur.pendingDiscard).map(Number)
+      : cur.phase === "gold" ? Object.keys(cur.pendingGold || {}).map(Number) : [cur.turn];
     try {
       let photoId = "";
       if (kind === "photo") {
@@ -2209,11 +2507,16 @@ export default function App() {
       playQuack(g.duckKind);
     }
     const mine = seat != null && (g.duckTo || []).includes(seat) &&
-      (g.turn === seat || (g.pendingDiscard[seat] || 0) > 0);
+      (g.turn === seat || owes(g, seat));
     if (!mine) return;
     const id = setInterval(() => playQuack(g.duckKind), 3000);
     return () => clearInterval(id);
   }, [g, seat]);
+
+  /* this phone has now seen how this game ended */
+  useEffect(() => {
+    if (g && g.winner != null && seat != null) markSawEnd(g.arena?.id, g.gameNo || 1);
+  }, [g && g.code, g && g.winner, seat]);
 
   /* keep this phone's push subscription registered for the current game */
   useEffect(() => {
@@ -2355,8 +2658,8 @@ export default function App() {
     for (let i = 2; i <= myCount; i++) seats.push(`Player ${i}`);
     let game = null, r = null;
     for (let tries = 0; tries < 5; tries++) {
-      game = newGame(makeCode4(), seats);
-      game.rules = { win: myWin, friendly: myFriendly, classic: myClassic };
+      game = newGame(makeCode4(), seats, myMap);
+      game.rules = { win: myWin, friendly: myFriendly, classic: myClassic, masters: myMasters };
       game.players[0].claimed = true;
       const t = makeTok(game.code);
       game.players[0].tok = t;
@@ -2382,6 +2685,7 @@ export default function App() {
     if (seat != null) rememberSeat(newCode, seat);
     rememberGame(newCode);
     forgetGame(prev.code); // the finished game lives on inside the new one's series record
+    setNextMap(null);
     setNote("");
     await loadByCode(newCode);
   };
@@ -2391,7 +2695,7 @@ export default function App() {
     if (prev.rematch) return joinRematch(prev.rematch);
     let fresh = null, r = null;
     for (let tries = 0; tries < 5; tries++) {
-      fresh = makeRematch(prev, makeCode4());
+      fresh = makeRematch(prev, makeCode4(), nextMap);
       fresh.seq = 1;
       r = await serverPut(fresh, seat);
       if (r.ok || !r.conflict) break; // conflict means the code is taken — reroll
@@ -2501,6 +2805,8 @@ export default function App() {
               onChange={(e) => setMyName(e.target.value)}
               style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,.05)", border: `1px solid ${C.line}`, borderRadius: 4,
                 padding: "9px 10px", color: C.parch, fontFamily: bodyFont, fontSize: 15, marginBottom: 12 }} />
+            <Eyebrow>Which island</Eyebrow>
+            <MapPick value={myMap} onChange={(m) => { setMyMap(m); setMyWin(MAPS[m].win); }} />
             <Eyebrow>How many settlers</Eyebrow>
             <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
               {[2, 3, 4].map((n) => (
@@ -2512,7 +2818,7 @@ export default function App() {
             </div>
             <Eyebrow>House rules</Eyebrow>
             <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-              {[8, 10, 12].map((n) => (
+              {(myMap === "classic" ? [8, 10, 12] : [12, 14, 15]).map((n) => (
                 <button key={n} onClick={() => setMyWin(n)} style={{ flex: 1,
                   background: myWin === n ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
                   border: `1px solid ${myWin === n ? C.gold : C.line}`, color: myWin === n ? C.gold : C.parchDim,
@@ -2530,6 +2836,12 @@ export default function App() {
               border: `1px solid ${myClassic ? C.gold : C.line}`, color: myClassic ? C.gold : C.parchDim,
               borderRadius: 5, padding: "9px 12px", fontFamily: dispFont, fontSize: 13, cursor: "pointer", marginBottom: 12 }}>
               Road-splitting towns {myClassic ? "— on" : "— off"} <span style={{ textTransform: "none", fontFamily: bodyFont, fontSize: 12 }}>(classic Catan: a town may land mid-road and cut a longest road)</span>
+            </button>
+            <button title="rule-masters" onClick={() => setMyMasters(!myMasters)} style={{ width: "100%", textAlign: "left",
+              background: myMasters ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
+              border: `1px solid ${myMasters ? C.gold : C.line}`, color: myMasters ? C.gold : C.parchDim,
+              borderRadius: 5, padding: "9px 12px", fontFamily: dispFont, fontSize: 13, cursor: "pointer", marginBottom: 12 }}>
+              Masters {myMasters ? "— on" : "— off"} <span style={{ textTransform: "none", fontFamily: bodyFont, fontSize: 12 }}>({MASTERS_HINT})</span>
             </button>
             <Btn tone="go" onClick={create} style={{ width: "100%" }}>Create game</Btn>
           </div>
@@ -2639,7 +2951,7 @@ export default function App() {
             {g.arena?.name ? `${g.arena.name} · game ${g.code}` : `Game ${g.code}`} — the island appears when everyone's aboard.
           </div>
           <div style={{ color: C.gold, marginTop: 6, fontSize: 13, fontFamily: dispFont, letterSpacing: ".1em", textTransform: "uppercase" }}>
-            {rulesLine(g.rules)}
+            {rulesLine(g.rules)}{mapLine(g)}
           </div>
           <div style={{ marginTop: 20, border: `1px solid ${C.line}`, borderRadius: 8, padding: 16, background: C.panel }}>
             <Eyebrow>Game lobby — {aboard} of {g.players.length} aboard</Eyebrow>
@@ -2672,6 +2984,13 @@ export default function App() {
               Start with {aboard} — drop the empty seats
             </Btn>
           )}
+          {/* a full lobby that somehow never started (older builds stranded
+              one when the last empty seat was removed): anyone can cast off */}
+          {aboard >= 2 && aboard === g.players.length && (
+            <Btn tone="go" onClick={() => apply((d) => startLobby(d, false))} style={{ width: "100%", marginTop: 10, padding: "13px", fontSize: 15 }}>
+              Everyone's aboard — start the game
+            </Btn>
+          )}
           {note && <div style={{ marginTop: 14, color: "#f0b9a8", lineHeight: 1.5 }}>{note}</div>}
           <div style={{ marginTop: 18, color: C.parchDim, fontSize: 13, lineHeight: 1.6 }}>
             The game starts itself the moment every seat is taken — turn order is drawn at random right then,
@@ -2687,9 +3006,11 @@ export default function App() {
   const duckFresh = g.duckAt > 0 && now - g.duckAt < 45000 && g.winner == null;
   const quackedMe = actor != null && g.winner == null && g.duckAt > 0 &&
     (g.duckTo || []).includes(actor) &&
-    (g.turn === actor || (g.pendingDiscard[actor] || 0) > 0);
+    (g.turn === actor || owes(g, actor));
   const hand = actor != null ? g.hands[actor] : emptyHand();
   const owed = actor != null ? g.pendingDiscard[actor] || 0 : 0;
+  const owedGold = actor != null && g.phase === "gold" ? (g.pendingGold || {})[actor] || 0 : 0;
+  const seaMap = mapOf(g).ships;
   const myTurn = actor != null && g.turn === actor && g.winner == null;
   const canBuy = (k) => canAfford(hand, COST[k]);
   /* ports you own, 2:1s first — the hand's port row and the bank sheet's rates */
@@ -2702,6 +3023,7 @@ export default function App() {
   const canDo = (k) => {
     if (actor == null) return false;
     if (k === "road") return (canBuy("road") || g.freeRoads > 0) && countOwned(g, actor, "road") < LIMIT.road && legalRoads(g, actor, null).length > 0;
+    if (k === "ship") return seaMap && (canBuy("ship") || g.freeRoads > 0) && countOwned(g, actor, "ship") < LIMIT.ship && legalShips(g, actor, null).length > 0;
     if (k === "town") return canBuy("settlement") && countOwned(g, actor, "settlement") < LIMIT.settlement && legalSettlements(g, actor, false).length > 0;
     if (k === "city") return canBuy("city") && countOwned(g, actor, "city") < LIMIT.city && legalCities(g, actor).length > 0;
     if (k === "dev") return canBuy("dev") && g.devDeck.length > 0;
@@ -2709,6 +3031,7 @@ export default function App() {
   };
   const startBuild = (kind) => {
     if (kind === "road") setSel({ kind: "road", options: new Set(legalRoads(g, actor, null)) });
+    if (kind === "ship") setSel({ kind: "ship", options: new Set(legalShips(g, actor, null)) });
     if (kind === "town") setSel({ kind: "town", options: new Set(legalSettlements(g, actor, false)) });
     if (kind === "city") setSel({ kind: "city", options: new Set(legalCities(g, actor)) });
   };
@@ -2716,8 +3039,12 @@ export default function App() {
   const autoSel = (() => {
     if (!myTurn) return null;
     if (g.phase === "setupTown") return { kind: "town", options: new Set(legalSettlements(g, actor, true)) };
-    if (g.phase === "setupRoad") return { kind: "road", options: new Set(legalRoads(g, actor, g.lastSetupVertex)) };
-    if (g.phase === "robber") return { kind: "robber", options: new Set(g.board.hexes.filter((h) => h.id !== g.board.robber).map((h) => h.id)) };
+    if (g.phase === "setupRoad") {
+      /* beside a first town on the shore, the piece may be a road or a ship */
+      const roadOpts = new Set(legalRoads(g, actor, g.lastSetupVertex)), shipOpts = new Set(legalShips(g, actor, g.lastSetupVertex));
+      return { kind: "road", options: new Set([...roadOpts, ...shipOpts]), roadOpts, shipOpts };
+    }
+    if (g.phase === "robber") return { kind: "robber", options: new Set(g.board.hexes.filter((h) => h.id !== g.board.robber && h.terrain !== "sea").map((h) => h.id)) };
     return null;
   })();
   const effSel = autoSel || (g.phase === "main" ? sel : null);
@@ -2729,22 +3056,25 @@ export default function App() {
     setPending({ kind: effSel.kind, id });
   };
   const pendingValid = pending && effSel && pending.kind === effSel.kind && effSel.options.has(pending.id);
-  const confirmPick = () => {
+  const confirmPick = (asShip) => {
     if (!pendingValid) { setPending(null); return; }
     const id = pending.id;
     setPending(null);
     if (effSel.kind === "robber") return apply((d) => moveRobber(d, id, actor));
     if (g.phase === "setupTown") return apply((d) => placeSetupTown(d, id, actor));
-    if (g.phase === "setupRoad") return apply((d) => placeSetupRoad(d, id, actor));
+    if (g.phase === "setupRoad") return apply((d) => placeSetupRoad(d, id, actor, asShip === true || !effSel.roadOpts.has(id)));
     if (effSel.kind === "road") return apply((d) => buildRoad(d, id, actor));
+    if (effSel.kind === "ship") return apply((d) => buildShip(d, id, actor));
     if (effSel.kind === "town") return apply((d) => buildTown(d, id, actor));
     if (effSel.kind === "city") return apply((d) => buildCity(d, id, actor));
   };
-  const confirmLabel = { town: "Found the town here", city: "Raise the city here", road: "Lay the road here", robber: "Move the robber here" };
+  const confirmLabel = { town: "Found the town here", city: "Raise the city here", road: "Lay the road here", ship: "Launch the ship here", robber: "Move the robber here" };
 
   const status = (() => {
     if (g.winner != null) return `${pname(g, g.winner)} wins with ${scoreFor(g, g.winner, true)} points.`;
     if (owed > 0) return `You rolled into a seven — discard ${owed} cards.`;
+    if (owedGold > 0) return `Your gold paid out — choose ${owedGold} resource${owedGold === 1 ? "" : "s"}.`;
+    if (g.phase === "gold") return `Waiting for ${Object.keys(g.pendingGold || {}).map((p) => pname(g, +p)).join(", ")} to pick their gold.`;
     if (!myTurn) {
       const up = g.players[g.turn];
       if (!up.claimed) return `Waiting for someone to take ${up.name}'s seat — send them the invite link.`;
@@ -2756,7 +3086,7 @@ export default function App() {
     }
     switch (g.phase) {
       case "setupTown": return "Tap a highlighted corner to found a town.";
-      case "setupRoad": return "Now lay a road beside it.";
+      case "setupRoad": return seaMap ? "Now lay a road beside it — or launch a ship from the shore." : "Now lay a road beside it.";
       case "roll": return "Roll the dice to start your turn.";
       case "discard": return "Waiting for the others to discard.";
       case "robber": return "Tap a hex to move the robber.";
@@ -2804,7 +3134,7 @@ export default function App() {
           <div title="arena-name" onClick={() => setModal({ k: "log" })} style={{ marginTop: 6, fontFamily: dispFont, fontSize: 13,
             letterSpacing: ".14em", textTransform: "uppercase", color: C.gold, cursor: "pointer",
             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            {g.arena.name}<span style={{ color: C.parchDim }}> · game {g.gameNo || 1}</span>
+            {g.arena.name}<span style={{ color: C.parchDim }}> · game {g.gameNo || 1}{mapLine(g)}</span>
           </div>
         )}
         {cupOf(g) >= 0 && (() => {
@@ -2836,6 +3166,7 @@ export default function App() {
               <div style={{ fontSize: 10, color: C.parchDim, fontFamily: dispFont, letterSpacing: ".06em" }}>
                 {handTotal(g.hands[i])}c · {g.devHands[i].filter((c) => !c.used).length}d
                 {g.longestRoad === i ? " · LR" : ""}{g.largestArmy === i ? " · LA" : ""}
+                {g.rules?.masters && harbormaster(g, i) ? " · ⚓" : ""}{g.rules?.masters && desertMaster(g, i) ? " · 🏜️" : ""}
                 {g.wins?.[i] ? ` · ★${g.wins[i]}` : ""}
                 {(() => { const t = (g.trophies?.[i] || []).reduce((a, b) => a + b, 0); return t ? ` · 🏆${t}` : ""; })()}
               </div>
@@ -2857,6 +3188,44 @@ export default function App() {
           <PillRow>{others.map((o) => <GamePill key={o.code} o={o} onGo={switchGame} />)}</PillRow>
         </div>
       )}
+
+      {/* the game is over: say so where the turn banner was, with the way
+          onward right there — the full result card sits below the board */}
+      {g.winner != null && (
+        <div title="over-bar" style={{ padding: "8px 14px", background: "rgba(224,164,55,.16)", borderBottom: `1px solid ${C.gold}`,
+          fontFamily: dispFont, fontSize: 13, letterSpacing: ".1em", textTransform: "uppercase", color: C.gold,
+          display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ flex: 1 }}>
+            🎆 Game over — {g.winner === actor ? "you won" : `${pname(g, g.winner)} won`}
+            {cupOf(g) >= 0 && cupWinners(g).length > 0 &&
+              <span style={{ color: C.parchDim }}> · 🏆 {cupWinners(g).map((i) => pname(g, i)).join(" & ")}</span>}
+          </span>
+          {(actor != null || g.rematch) && (
+            <Btn tone="go" onClick={startRematch} style={{ padding: "6px 10px", fontSize: 12 }}>
+              {g.rematch ? "Join the rematch" : "Rematch"}</Btn>
+          )}
+        </div>
+      )}
+
+      {/* opened a rematch without having seen the last game end (a push, the
+          home list): say how it ended before anything else */}
+      {(() => {
+        const last = (g.history || [])[(g.history || []).length - 1];
+        const prevNo = (g.gameNo || 1) - 1;
+        if (g.winner != null || !last || !g.arena?.id || prevNo < 1 || sawEnd(g.arena.id) >= prevNo) return null;
+        const cw = last.k != null ? [...(last.cw || "")].map(Number) : [];
+        return (
+          <div title="last-game" style={{ margin: "10px 14px 0", border: `1px solid ${C.gold}`, borderRadius: 7, padding: "10px 12px",
+            background: "rgba(224,164,55,.1)", display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ flex: 1, fontSize: 14, lineHeight: 1.45 }}>
+              <b>Game {prevNo} is over — {last.w === actor ? "you won it" : `${pname(g, last.w)} won it`}.</b>
+              {cw.length > 0 && <> 🏆 The {CUPS[last.k].name} went to {cw.map((i) => (i === actor ? "you" : pname(g, i))).join(" and ")}.</>}
+              <span style={{ color: C.parchDim }}> This is game {g.gameNo} — same crew, new island.</span>
+            </div>
+            <Btn onClick={() => { markSawEnd(g.arena.id, prevNo); setSawTick((n) => n + 1); }} style={{ padding: "6px 10px", fontSize: 12 }}>Got it</Btn>
+          </div>
+        );
+      })()}
 
       {/* from a finished board, the next game that's already going stays one tap away */}
       {g.winner != null && others.length > 0 && (
@@ -2900,9 +3269,17 @@ export default function App() {
       {/* nothing is placed until this is tapped */}
       {pendingValid && (
         <div style={{ display: "flex", gap: 8, padding: "10px 14px", borderTop: `1px solid ${C.line}`, background: "rgba(224,164,55,.07)" }}>
-          <Btn tone="go" style={{ flex: 1, padding: "12px", fontSize: 15 }} onClick={confirmPick}>
-            {confirmLabel[pending.kind] || "Confirm"}
-          </Btn>
+          {/* on the shore during setup the same edge takes either piece */}
+          {(g.phase !== "setupRoad" || effSel.roadOpts.has(pending.id)) && (
+            <Btn tone="go" style={{ flex: 1, padding: "12px", fontSize: 15 }} onClick={() => confirmPick(false)}>
+              {confirmLabel[pending.kind] || "Confirm"}
+            </Btn>
+          )}
+          {g.phase === "setupRoad" && effSel.shipOpts.has(pending.id) && (
+            <Btn tone="go" style={{ flex: 1, padding: "12px", fontSize: 15 }} onClick={() => confirmPick(true)}>
+              {confirmLabel.ship}
+            </Btn>
+          )}
           <Btn onClick={() => setPending(null)} style={{ padding: "12px 14px" }}>Cancel</Btn>
         </div>
       )}
@@ -2928,14 +3305,18 @@ export default function App() {
             <Btn tone="warn" style={{ marginLeft: "auto", padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
               onClick={() => setModal({ k: "discard" })}>Discard {owed} cards</Btn>
           )}
+          {owedGold > 0 && (
+            <Btn tone="go" style={{ marginLeft: "auto", padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
+              onClick={() => setModal({ k: "gold" })}>💰 Pick {owedGold}</Btn>
+          )}
           {myTurn && g.phase === "main" && (
             <Btn tone="warn" style={{ marginLeft: "auto", padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
               onClick={() => apply((d) => endTurn(d))}>End turn</Btn>
           )}
-          {!myTurn && g.winner == null && owed === 0 && g.players[g.turn]?.claimed && (
+          {!myTurn && g.winner == null && owed === 0 && owedGold === 0 && g.players[g.turn]?.claimed && (
             <Btn title="pick-mascot" onClick={() => setModal({ k: "mascot" })} style={{ marginLeft: "auto", padding: "8px 10px", fontSize: 12, flexShrink: 0 }}>▾</Btn>
           )}
-          {!myTurn && g.winner == null && owed === 0 && g.players[g.turn]?.claimed && (
+          {!myTurn && g.winner == null && owed === 0 && owedGold === 0 && g.players[g.turn]?.claimed && (
             <Btn title={`send-${mascotPick}`} style={{ padding: "8px 13px", fontSize: 12, flexShrink: 0 }}
               onClick={sendGull}>{mascotPick === "photo" && myPhoto()
                 ? <img src={myPhoto()} alt="" style={{ width: 16, height: 16, borderRadius: "50%", objectFit: "cover", verticalAlign: "-3px" }} />
@@ -3007,6 +3388,7 @@ export default function App() {
             <div title="quick-build" style={{ display: "flex", gap: 6, marginTop: 10 }}>
               {[
                 ["road", "Road", canDo("road"), () => startBuild("road")],
+                ...(seaMap ? [["ship", "Ship", canDo("ship"), () => startBuild("ship")]] : []),
                 ["town", "Town", canDo("town"), () => startBuild("town")],
                 ["city", "City", canDo("city"), () => startBuild("city")],
                 ["dev", "Dev card", canDo("dev"), () => apply((d) => buyDev(d, actor))],
@@ -3092,6 +3474,12 @@ export default function App() {
                 );
               })()}
             </div>
+            {actor != null && !g.rematch && (
+              <div title="next-island" style={{ marginTop: 12 }}>
+                <Eyebrow>Next island</Eyebrow>
+                <MapPick value={nextMap || g.map || "classic"} onChange={setNextMap} />
+              </div>
+            )}
             {(actor != null || g.rematch) && (
               <Btn tone="go" style={{ width: "100%", marginTop: 12, padding: "13px", fontSize: 15 }}
                 onClick={startRematch}>
@@ -3124,6 +3512,15 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {/* same for gold nobody came back to pick: a random draw from the bank */}
+        {actor != null && g.phase === "gold" && g.sevenAt > 0 && now - g.sevenAt > (window.HARBOR_DEPUTY_MS || 600000) &&
+          Object.keys(g.pendingGold || {}).map(Number).filter((p) => p !== actor).map((p) => (
+            <Btn key={"g" + p} tone="warn" style={{ width: "100%", marginBottom: 10 }}
+              onClick={() => apply((d) => deputyGold(d, p, actor))}>
+              {pname(g, p)} is holding things up — draw their {g.pendingGold[p]} gold at random
+            </Btn>
+          ))}
 
         {/* someone wandered off mid-seven: after a long wait, anyone may throw
             random cards for them (it's announced in the log) */}
@@ -3173,6 +3570,11 @@ export default function App() {
                 <BuildRow label="Road" cost="1 brick · 1 lumber" note={`${countOwned(g, actor, "road")}/15`}
                   disabled={!canDo("road")}
                   active={sel?.kind === "road"} onClick={() => startBuild("road")} />
+                {seaMap && (
+                  <BuildRow label="Ship" cost="1 lumber · 1 wool" note={`${countOwned(g, actor, "ship")}/15`}
+                    disabled={!canDo("ship")}
+                    active={sel?.kind === "ship"} onClick={() => startBuild("ship")} />
+                )}
                 <BuildRow label="Town" cost="1 brick · 1 lumber · 1 wool · 1 grain" note={`${countOwned(g, actor, "settlement")}/5`}
                   disabled={!canDo("town")}
                   active={sel?.kind === "town"} onClick={() => startBuild("town")} />
@@ -3272,7 +3674,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
   const [shooting, setShooting] = useState(false);
   const [secretWord, setSecretWord] = useState("");
   const [arenaName, setArenaName] = useState(g.arena?.name || "");
-  const [draftRules, setDraftRules] = useState({ win: 10, friendly: false, classic: false });
+  const [draftRules, setDraftRules] = useState({ win: 10, friendly: false, classic: false, masters: false });
   const [pickKind, setPickKind] = useState(() => myMascot());
   const [pickWord, setPickWord] = useState(() => myWord());
   const [pickPhoto, setPickPhoto] = useState(() => myPhoto());
@@ -3281,7 +3683,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
     setPlenty(emptyHand()); setPartner(null); setBankGive(modal.give || null); setBankWant(null);
     setNewName(actor != null ? g.players[actor].name : ""); setSecretWord("");
     setArenaName(g.arena?.name || "");
-    setDraftRules({ win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic });
+    setDraftRules({ win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic, masters: !!g.rules?.masters });
   }, [modal.k]);
   const close = () => setModal(null);
   const cap = (n) => ({ brick: n, lumber: n, wool: n, grain: n, ore: n });
@@ -3311,7 +3713,7 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
         <div style={{ marginBottom: 14, display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <Eyebrow>House rules</Eyebrow>
-            <div style={{ fontSize: 14, color: C.parch }}>{rulesLine(g.rules)}</div>
+            <div style={{ fontSize: 14, color: C.parch }}>{rulesLine(g.rules)}{mapLine(g)}</div>
           </div>
           {actor != null && g.winner == null && (
             <Btn onClick={() => setModal({ k: "rules" })} style={{ padding: "6px 10px", fontSize: 12 }}>Change rules</Btn>
@@ -3460,8 +3862,9 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
 
   if (modal.k === "rules") {
     const floor = minWinTarget(g);
-    const cur = { win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic };
-    const changed = draftRules.win !== cur.win || draftRules.friendly !== cur.friendly || draftRules.classic !== cur.classic;
+    const cur = { win: g.rules?.win || 10, friendly: !!g.rules?.friendly, classic: !!g.rules?.classic, masters: !!g.rules?.masters };
+    const changed = draftRules.win !== cur.win || draftRules.friendly !== cur.friendly || draftRules.classic !== cur.classic || draftRules.masters !== cur.masters;
+    const mastersBlocked = !cur.masters && mastersWouldWin(g, draftRules.win);
     const toggle = (key, label, hint) => (
       <button onClick={() => setDraftRules((r) => ({ ...r, [key]: !r[key] }))} style={{ width: "100%", textAlign: "left",
         background: draftRules[key] ? "rgba(224,164,55,.16)" : "rgba(255,255,255,.04)",
@@ -3488,6 +3891,9 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
         </div>
         {toggle("classic", "Road-splitting towns", "classic Catan: a town may land mid-road and cut a longest road")}
         {toggle("friendly", "Friendly robber", "no robbing anyone below 3 points")}
+        {mastersBlocked
+          ? <div style={{ color: C.parchDim, fontSize: 12, lineHeight: 1.5, marginBottom: 8 }}>Masters can't be switched on right now — the bonus would hand someone the game. Raise the target first.</div>
+          : toggle("masters", "Masters", MASTERS_HINT)}
         <div style={{ marginTop: 6, color: C.parchDim, fontSize: 13, lineHeight: 1.5 }}>
           Changes apply from now on, are announced in the log, and carry into every rematch.
           A target someone has already reached on the board can't be picked.
@@ -3735,7 +4141,11 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
         </div>
         {rowLine("Dev cards played", playedSummary(g, who) || "none yet")}
         {rowLine("Knights on the table", g.knights[who])}
-        {rowLine("Longest road", `${g.roadLen[who]} segment${g.roadLen[who] === 1 ? "" : "s"}${g.longestRoad === who ? " · holds Longest Road" : ""}`)}
+        {g.rules?.masters && rowLine("Harbormaster", `${harboursHeld(g, who)} of 2 harbours${harbormaster(g, who) ? " · +2 points" : ""}`)}
+        {g.rules?.masters && rowLine("Desert Master", `${desertTowns(g, who)} of 2 desert towns${desertMaster(g, who) ? " · +2 points" : ""}`)}
+        {mapOf(g).ships && rowLine("Ships at sea", `${countOwned(g, who, "ship")} of ${LIMIT.ship}`)}
+        {mapOf(g).ships && rowLine("Islands settled", `${islandsSettled(g, who)} · +${2 * islandsSettled(g, who)} points`)}
+        {rowLine(mapOf(g).ships ? "Longest trade route" : "Longest road", `${g.roadLen[who]} segment${g.roadLen[who] === 1 ? "" : "s"}${g.longestRoad === who ? " · holds Longest Road" : ""}`)}
         {rowLine("Cards in hand", `${handTotal(g.hands[who])} resource · ${g.devHands[who].filter((c) => !c.used).length} dev`)}
         {(g.wins?.[who] || 0) > 0 && rowLine("Series wins", g.wins[who])}
         {mine && g.devHands[who].filter((c) => !c.used).length > 0 &&
@@ -3807,6 +4217,26 @@ function Modals({ modal, setModal, g, actor, hand, apply, owed, setNote, onMasco
           onClick={() => { apply((d) => doDiscard(d, actor, pick)); close(); }}>
           {total === owed ? `Discard ${owed}` : `${total} of ${owed} chosen`}</Btn>}>
         <ResStepper value={pick} max={hand} onChange={(r, v) => setPick({ ...pick, [r]: Math.min(v, hand[r]) })} />
+      </Sheet>
+    );
+  }
+
+  if (modal.k === "gold") {
+    const owedGold = (g.pendingGold || {})[actor] || 0;
+    const total = handTotal(pick);
+    return (
+      <Sheet title={`Gold — choose ${owedGold}`} onClose={close}
+        footer={<Btn tone="go" disabled={total !== owedGold || !owedGold} style={{ flex: 1 }}
+          onClick={() => { apply((d) => takeGold(d, actor, pick)); close(); }}>
+          {total === owedGold ? `Take ${fmtHand(pick)}` : `${total} of ${owedGold} chosen`}</Btn>}>
+        <div style={{ color: C.parchDim, fontSize: 13, lineHeight: 1.5, marginBottom: 10 }}>
+          A gold hex pays whatever you like: one resource per town beside it, two per city.
+        </div>
+        {(() => {
+          /* each row tops out at what the bank holds and what is still owed */
+          const cap = Object.fromEntries(RES.map((r) => [r, Math.min(g.bank[r], (pick[r] || 0) + Math.max(0, owedGold - total))]));
+          return <ResStepper value={pick} max={cap} onChange={(r, v) => setPick({ ...pick, [r]: Math.min(v, cap[r]) })} />;
+        })()}
       </Sheet>
     );
   }

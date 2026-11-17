@@ -272,12 +272,18 @@ http.createServer((req, res) => {
           if (winner != null) {
             const gameSubs = subs.get(code) || new Map();
             for (const seat of gameSubs.keys()) {
-              if (seat !== by) notify(code, seat, { title, body: "The game is over — come see the final board.", code }, "over:" + seat);
+              const who = typeof meta.winnerName === "string" && meta.winnerName ? meta.winnerName.slice(0, 20) : "";
+              if (seat !== by) notify(code, seat, { title, body: who ? `Game over — ${who} won. Come see the final board.` : "The game is over — come see the final board.", code, kind: "over" }, "over:" + seat);
             }
           } else {
             if (Array.isArray(discard)) {
               for (const seat of discard) {
                 if (seat !== by) notify(code, seat, { title, body: "A seven was rolled — you need to discard.", code }, `disc:${seat}:${tn}`);
+              }
+            }
+            if (Array.isArray(meta.gold)) {
+              for (const seat of meta.gold) {
+                if (seat !== by) notify(code, seat, { title, body: "Your gold paid out — pick your resources.", code }, `gold:${seat}:${tn}`);
               }
             }
             if (Number.isInteger(turn) && turn !== by) {

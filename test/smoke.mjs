@@ -749,6 +749,30 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
 }
 
 // ---- lobby management: kick, and start with fewer than asked ----
+// ---- four invited, one shows up: trimming the empty seats must start the game ----
+{
+  const S = boot(BASE);
+  await wait(S, (x) => !!x.document.querySelector('input[placeholder="Your name"]'));
+  setInput(S, S.document.querySelector('input[placeholder="Your name"]'), "Quad");
+  await sleep(80);
+  click(S, "4"); await sleep(80);
+  click(S, "Create game");
+  await wait(S, (x) => H(x).includes("1 of 4 aboard"));
+  const code4 = (H(S).match(/Game ([A-Z0-9]{4})/) || [])[1];
+  const J = boot(BASE + "#g=" + code4);
+  await wait(J, (x) => H(x).includes("pick your seat"));
+  setInput(J, J.document.querySelector("input"), "Solo");
+  await sleep(80);
+  tap(J, [...J.document.querySelectorAll("button")].find((b) => b.textContent.includes("Take this seat") && !b.disabled));
+  await wait(S, (x) => H(x).includes("2 of 4 aboard"));
+  click(S, "Remove");
+  await wait(S, (x) => H(x).includes("2 of 3 aboard"));
+  click(S, "Remove");
+  const off = await wait(S, (x) => H(x).includes("<svg"), 5000) && await wait(J, (x) => H(x).includes("<svg"), 5000);
+  check("removing the last empty seat starts the game instead of stranding the lobby",
+    off && (H(S).match(/·\s*\d+d/g) || []).length === 2);
+}
+
 {
   const G = boot(BASE);
   await wait(G, (x) => !!x.document.querySelector('input[placeholder="Your name"]'));
@@ -906,6 +930,11 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
   const won = (await Promise.all(pair.map((w) => wait(w, (x) => H(x).includes("WINS"), 6000)))).every(Boolean);
   check("a win ends the game on every phone", won);
   check("the chat is burned when someone wins", await waitState(codeW, (o) => (o.cm || []).length === 0));
+  check("the turn banner gives way to a game-over bar on every phone",
+    pair.every((w) => /Game over — (you|\w+) won/.test((w.document.querySelector('[title="over-bar"]') || {}).textContent || "")));
+  for (let t = 0; t < 30 && !pushLog().some((p) => p.code === codeW && p.kind === "over"); t++) await sleep(100);
+  check("the game-over push names the winner",
+    pushLog().some((p) => p.code === codeW && p.kind === "over" && /Game over — (Win|Lose) won/.test(p.body)));
 
   if (won) {
     // both phones offer the rematch — the banner names the actual winner
@@ -936,6 +965,23 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
       followed && !H(otherW).includes("pick your seat")
       && new RegExp(`you're ${loserName}|Your turn, ${loserName}`).test(H(otherW)));
     check("the rematch carries the series tally forward", H(otherW).includes("★1"));
+    check("someone who watched the game end is not told again", !otherW.document.querySelector('[title="last-game"]'));
+
+    // a phone that reaches the rematch any other way — a push, the home list,
+    // a link — holds only the old game's token. It must still land in its
+    // seat (this used to dump people on "pick your seat"), and be told how
+    // the game it missed the end of turned out.
+    {
+      const X = boot(BASE + "#g=" + newCode, { ["harbor-tok-" + codeW]: otherW.localStorage.getItem("harbor-tok-" + codeW) });
+      const inX = await wait(X, (x) => H(x).includes("<svg"), 8000);
+      check("a phone that reaches the rematch by link keeps its seat",
+        inX && !H(X).includes("pick your seat") && new RegExp(`you're ${loserName}|Your turn, ${loserName}`).test(H(X)));
+      const card = () => X.document.querySelector('[title="last-game"]');
+      check("it is told how the last game ended",
+        !!card() && card().textContent.includes(`Game 1 is over — ${loserName === "Lose" ? "Win" : "Lose"} won it`));
+      click(X, "Got it"); await sleep(150);
+      check("the last-game card goes away once read", !card());
+    }
     check("the arena's name sits in the game header",
       (otherW.document.querySelector('[title="arena-name"]') || {}).textContent?.includes("Duck Pond"));
     const remembered = (w) => JSON.parse(w.localStorage.getItem("harbor-games") || "[]").map((x) => x.code);
@@ -1029,6 +1075,10 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
         res.includes("HARVEST CUP") && res.includes(cupG.n[1] + " takes the trophy") && res.includes("9 gained"));
       check("the end screen names the next cup",
         /Next cup: game 6, the Road Cup/.test((K.document.querySelector('[title="next-cup"]') || {}).textContent || ""));
+      // the crew picks a different island for the next game: the arena, the
+      // tally and the trophies carry over, the board and target change
+      tap(K, K.document.querySelector('[title="map-shores"]'));
+      await sleep(80);
       click(K, "Rematch");
       const nextCode = await (async () => {
         for (let i = 0; i < 80; i++) {
@@ -1042,6 +1092,8 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
       check("the cup trophy carries into game 4, on the right seat",
         !!g4 && g4.gn === 4 && g4.tp?.[1]?.[0] === 1 && g4.tp?.[0]?.every((x) => x === 0));
       check("the cup is recorded in the history entry", !!g4 && /:0:1$/.test(g4.hi[g4.hi.length - 1]));
+      check("the rematch is played on the island that was picked, to its own target",
+        !!g4 && g4.mp === 1 && g4.ru[0] === 14 && g4.t.length === 37 && g4.ar[0] === cupG.ar[0]);
       check("the trophy shows on the player's tile in game 4", !!nextCode && H(K).includes("🏆1"));
       check("game 4 is not a cup game", !K.document.querySelector('[title="cup-chip"]'));
 
@@ -1066,6 +1118,143 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
         !!g4 && g4.ws.split(",").map(Number)[0] === Number(newS.ws.split(",")[0]) + 1);
     }
   }
+}
+
+// ---- New Shores: sea, ships, gold and the island bonus ----
+{
+  const DBG = { HARBOR_DEBUG: {} };
+  const P = boot(BASE, null, DBG);
+  await wait(P, (x) => !!x.document.querySelector('input[placeholder="Your name"]'));
+  const maps = P.HARBOR_DEBUG.maps, geo = maps.shores.geo, cgeo = maps.classic.geo;
+  const kindOf = (id) => geo.byId[id].kind;
+  check("the classic frame is still 19 hexes, 54 corners, 72 edges",
+    cgeo.hexes.length === 19 && cgeo.VIDX.length === 54 && cgeo.EIDX.length === 72);
+  check("the New Shores frame is 37 hexes, 96 corners, 132 edges",
+    geo.hexes.length === 37 && geo.VIDX.length === 96 && geo.EIDX.length === 132);
+  check("no small island touches the main island or another island",
+    geo.hexes.every((h) => kindOf(h.id) === "S" || geo.nb[h.id].every((n) => kindOf(n) === "S" || kindOf(n) === kindOf(h.id))));
+  const portVerts = geo.portSpots.flatMap((sp) => sp.e.split("|"));
+  check("New Shores has eight ports on the main shore, none sharing a corner",
+    geo.portSpots.length === 8 && new Set(portVerts).size === 16 && portVerts.every((v) => geo.vertexLand[v] === "M"));
+
+  setInput(P, P.document.querySelector('input[placeholder="Your name"]'), "Sea");
+  await sleep(80);
+  tap(P, P.document.querySelector('[title="map-shores"]'));
+  await sleep(80);
+  click(P, "2"); await sleep(80);
+  click(P, "Create game");
+  await wait(P, (x) => H(x).includes("aboard"));
+  const codeS = (H(P).match(/Game ([A-Z0-9]{4})/) || [])[1];
+  check("the lobby names the island and its target", /First to 14 · New Shores/.test(P.document.body.textContent));
+  const Q = boot(BASE + "#g=" + codeS, null, DBG);
+  await wait(Q, (x) => H(x).includes("pick your seat"));
+  setInput(Q, Q.document.querySelector("input"), "Salt");
+  await sleep(80);
+  tap(Q, [...Q.document.querySelectorAll("button")].find((b) => b.textContent.includes("Take this seat") && !b.disabled));
+  const pair = [P, Q];
+  await Promise.all(pair.map((w) => wait(w, (x) => H(x).includes("<svg"), 6000)));
+
+  // setup: towns only on the main island; beside a shore town the second
+  // piece may be a ship
+  let launched = 0;
+  for (let st = 0; st < 4; st++) {
+    const w = await activePlacer(pair);
+    if (!w) break;
+    const sp = spots(w); await place(w, sp[Math.floor(Math.random() * sp.length)]);
+    await wait(w, (x) => roadPicks(x).length > 0);
+    let done = false;
+    for (const el of roadPicks(w)) {
+      tap(w, el); await sleep(60);
+      const ship = btn(w, "Launch the ship here");
+      if (ship) { tap(w, ship); launched++; done = true; break; }
+    }
+    if (!done) { const rd = roadPicks(w); await place(w, rd[0]); }
+    await sleep(250);
+  }
+  const s0 = await (async () => { await waitState(codeS, (o) => o.ph === 2, 5000); return decodeState(codeS); })();
+  check("a New Shores game stores its map, sea and gold",
+    s0.mp === 1 && s0.t.length === 37 && (s0.t.match(/6/g) || []).length === 16 && (s0.t.match(/7/g) || []).length === 2);
+  check("setup towns all stand on the main island",
+    s0.b.length === 12 && s0.b.filter((_, k) => k % 3 === 0).every((vi) => geo.vertexLand[geo.VIDX[vi]] === "M"));
+  check("setup pieces are roads or ships, one per town", (s0.r.length + (s0.sh || []).length) / 2 === 4);
+  console.log(`  (setup ships launched: ${launched})`);
+
+  // mid-game, doctored: seat 0 holds a shore town with open water beside it,
+  // a town on a small island, cards to spend, and it is their turn
+  const put = async (c, o) => {
+    const blob = "z" + gzipSync(Buffer.from(JSON.stringify(o))).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    return fetch(BASE + "api/g/" + c, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ v: o.q, blob }) });
+  };
+  const usedV = new Set(s0.b.filter((_, k) => k % 3 === 0).map((vi) => geo.VIDX[vi]));
+  const far = (v) => !usedV.has(v) && geo.vertexEdges[v].every((e) => e.split("|").every((x) => !usedV.has(x)));
+  const shoreV = geo.VIDX.find((v) => geo.vertexLand[v] === "M" && far(v) && geo.vertexEdges[v].some((e) => geo.edgeSea[e] && !geo.edgeLand[e]));
+  const isleV = geo.VIDX.find((v) => geo.vertexLand[v] && geo.vertexLand[v] !== "M");
+  const base = { ...s0, c: "SHIP", q: 1, ph: 3, tu: 0, tn: 5, h: [[5, 5, 5, 5, 5], [0, 0, 0, 0, 0]],
+    b: [...s0.b, geo.vI[shoreV], 0, 0, geo.vI[isleV], 0, 0] };
+  await put("SHIP", base);
+  const tok0 = P.localStorage.getItem("harbor-tok-" + codeS);
+  const R = boot(BASE + "#g=SHIP", { "harbor-tok-SHIP": tok0 }, DBG);
+  await wait(R, (x) => !!x.document.querySelector('[title="quick-build"]'), 8000);
+  const before = (base.sh || []).length;
+  tap(R, R.document.querySelector('[title="quick-build"]').querySelectorAll("button")[1]); // road, SHIP, town, city, dev
+  await wait(R, (x) => roadPicks(x).length > 0, 3000);
+  const openWater = roadPicks(R).length;
+  await place(R, roadPicks(R)[0]);
+  check("a ship can be launched from a shore town", openWater > 0 && await waitState("SHIP", (o) => (o.sh || []).length === before + 2, 4000));
+  const s1 = await decodeState("SHIP");
+  check("a ship costs one wood and one wool", s1.h[0].join() === "5,4,4,5,5");
+  check("a ship sits on water, never on an inland edge", geo.edgeSea[geo.EIDX[s1.sh[s1.sh.length - 2]]] === true);
+  tap(R, R.document.querySelector('[title="Your record"]'));
+  await wait(R, (x) => x.document.body.textContent.includes("Islands settled"), 3000);
+  check("a town on a small island is worth 2 bonus points",
+    /Islands settled1 · \+2 points/.test(R.document.body.textContent));
+  click(R, "×"); await sleep(120);
+
+  // gold: the turn waits while the owed player picks their own resources
+  const gold = { ...s1, c: "GOLD", q: 1, ph: 9, pg: [0, 2] };
+  await put("GOLD", gold);
+  const G2 = boot(BASE + "#g=GOLD", { "harbor-tok-GOLD": tok0 }, DBG);
+  await wait(G2, (x) => !!btn(x, "Pick 2"), 8000);
+  click(G2, "Pick 2");
+  await wait(G2, (x) => x.document.body.textContent.includes("Gold — choose 2"), 3000);
+  const plus = () => [...G2.document.querySelectorAll("button")].filter((b) => b.textContent.trim() === "+");
+  tap(G2, plus()[4]); await sleep(60); tap(G2, plus()[4]); await sleep(60);
+  check("you cannot pick more gold than you are owed", plus().every((b) => b.disabled));
+  click(G2, "Take 2 ore");
+  check("gold pays the resources its owner chose, then play resumes",
+    await waitState("GOLD", (o) => o.ph === 3 && o.pg === undefined && o.h[0][4] === s1.h[0][4] + 2 && o.bk[4] === s1.bk[4] - 2, 4000));
+
+  // the masters house rule: +2 for towns on two harbours, +2 for two towns
+  // around the desert — open to everyone, and only when the rule is on
+  {
+    const desert = geo.hexes[s0.t.indexOf("5")];
+    const extra = [geo.portSpots[0].e.split("|")[0], geo.portSpots[4].e.split("|")[0], desert.verts[0], desert.verts[2]];
+    const b = [...s0.b, ...extra.flatMap((v) => [geo.vI[v], 0, 0])];
+    const towns = new Set(b.filter((_, k) => k % 3 === 0).filter((_, k) => b[k * 3 + 1] === 0)).size;
+    const shown = async (c, ru) => {
+      await put(c, { ...s0, c, q: 1, ph: 3, tu: 0, tn: 5, b, ru });
+      const W = boot(BASE + "#g=" + c, { ["harbor-tok-" + c]: tok0 }, DBG);
+      await wait(W, (x) => !!x.document.querySelector('[title="Your record"]'), 8000);
+      tap(W, W.document.querySelector('[title="Your record"]'));
+      await wait(W, (x) => /\d+ points? \(/.test(x.document.body.textContent), 3000);
+      return { pts: +(W.document.body.textContent.match(/(\d+) points? \(/) || [])[1], text: W.document.body.textContent };
+    };
+    const off = await shown("MSOF", [14, 0, 0]);
+    const on = await shown("MSON", [14, 0, 0, 1]);
+    check("with the masters rule off, harbours and desert towns score nothing extra", off.pts === towns && !off.text.includes("Harbormaster"));
+    check("Harbormaster and Desert Master are worth 2 points each when the rule is on",
+      on.pts === towns + 4 && /Harbormaster[2-9] of 2 harbours · \+2 points/.test(on.text) && /Desert Master\d of 2 desert towns · \+2 points/.test(on.text));
+    if (on.pts !== towns + 4) console.log("  masters debug:", on.pts, towns, on.text.slice(0, 400));
+    check("the masters rule survives the round trip", (await decodeState("MSON")).ru[3] === 1 && (await decodeState("MSOF")).ru.length === 3);
+  }
+
+  // the robber may go to any land, small islands included — never open water
+  const rob = { ...s1, c: "ROBB", q: 1, ph: 5 };
+  await put("ROBB", rob);
+  const R2 = boot(BASE + "#g=ROBB", { "harbor-tok-ROBB": tok0 }, DBG);
+  await wait(R2, (x) => x.document.body.textContent.includes("Tap a hex to move the robber"), 8000);
+  const targets = [...R2.document.querySelectorAll("polygon")].filter((pg) => pg.style.cursor === "pointer").length;
+  check("the robber can be sent to any land hex but not to sea", targets === 37 - 16 - 1);
 }
 
 srv.kill();
