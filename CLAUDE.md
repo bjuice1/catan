@@ -116,6 +116,11 @@ test/smoke.mjs    Real server + four jsdom phones. See below.
   switched off. The win target is any whole number from 8 to 21, set with
   one stepper (`WinStepper`) on the create screen and in Change rules.
 
+- **The development deck never runs dry.** When the last card is bought,
+  `buyDev` deals a whole new 25-card deck. Nothing is reshuffled: played and
+  held cards stay where they are, so a long game can see more than 5 point
+  cards and more than 14 knights.
+
 - **A phone's seat follows its token, not the rematch button.** `makeRematch`
   copies every seat's `tok` forward, and `seatByTok` looks through every
   `harbor-tok-*` this phone holds, so a rematch reached by push, home list

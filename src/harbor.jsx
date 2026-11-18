@@ -1155,6 +1155,12 @@ function buyDev(g, p) {
   const card = g.devDeck.pop();
   g.devHands[p].push({ type: card, turn: g.turnNo, used: false });
   say(g, `${pname(g, p)} bought a development card.`);
+  /* the last card is gone: a whole new deck appears. Nothing is reshuffled
+     and nobody's cards, played or held, go anywhere. */
+  if (!g.devDeck.length) {
+    g.devDeck = makeDevDeck();
+    say(g, "🃏 The development deck ran out — a fresh deck of 25 appears.");
+  }
   return g;
 }
 

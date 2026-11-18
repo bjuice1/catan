@@ -1288,6 +1288,21 @@ check("server state blob stays small", stored.blob.length > 0 && stored.blob.len
         && Fresh.document.querySelector('[title="rule-masters"]').textContent.includes("— on")
         && (await decodeState("MSBY")).ru[0] === 21);
     }
+    // the development deck: when the last card is bought a fresh deck appears,
+    // and nobody's cards go anywhere
+    {
+      const held = [[[0, 1, 1], [1, 1, 0]], []]; // seat 0: a played knight and a held point card
+      await put("DECK", { ...s0, c: "DECK", q: 1, ph: 3, tu: 0, tn: 5, dd: "3", dh: held, h: [[0, 0, 1, 1, 1], [0, 0, 0, 0, 0]] });
+      const W = boot(BASE + "#g=DECK", { "harbor-tok-DECK": tok0 }, DBG);
+      await wait(W, (x) => !!x.document.querySelector('[title="quick-build"]'), 8000);
+      tap(W, [...W.document.querySelector('[title="quick-build"]').querySelectorAll("button")][4]); // road, ship, town, city, DEV
+      check("buying the last development card brings out a fresh deck of 25",
+        await waitState("DECK", (o) => o.dd.length === 25 && o.dh[0].length === 3 && o.dh[0][2][0] === 3, 4000));
+      const after = await decodeState("DECK");
+      check("nobody's cards are touched when the new deck appears",
+        JSON.stringify(after.dh[0].slice(0, 2)) === JSON.stringify(held[0]) && after.lg.some((m) => m.includes("fresh deck")));
+      check("the fresh deck is a full one", [14, 5, 2, 2, 2].every((n, k) => (after.dd.match(new RegExp(String(k), "g")) || []).length === n));
+    }
     check("the masters rule survives the round trip", (await decodeState("MSON")).ru[3] === 1 && (await decodeState("MSOF")).ru.length === 3);
   }
 
